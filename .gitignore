@@ -1,2 +1,6 @@
 .DS_Store
 .idea/
+
+# Generated from the private Pon-Chan repository's versioned machine/device
+# settings. Keep LAN endpoints and other local values out of this public repo.
+firmware/sdkconfig.defaults.local
