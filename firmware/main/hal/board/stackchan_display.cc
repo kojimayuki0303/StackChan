@@ -23,6 +23,7 @@
 #include <stackchan/stackchan.h>
 #include <assets/lang_config.h>
 #include <hal/hal.h>
+#include <hal/board/hal_bridge.h>
 #include <board.h>
 #include <display/lvgl_display/lvgl_image.h>
 
@@ -36,6 +37,23 @@ using namespace stackchan::avatar;
 // avatar has finished going back to its previous emotion and pose before the
 // dashboard covers the face again.
 static constexpr uint64_t kDashboardHeadPetRestoreDelayMs = 3500;
+
+// Voice sessions are deliberately user-initiated. The managed firmware config
+// disables wake-word detection; both the avatar and dashboard call this helper
+// only from an explicit touchscreen click.
+static void ToggleChatFromScreenTap()
+{
+    static uint32_t last_toggle_tick = 0;
+    const uint32_t now               = GetHAL().millis();
+    if (last_toggle_tick != 0 && now - last_toggle_tick < 2000) {
+        return;
+    }
+
+    if (hal_bridge::is_xiaozhi_ready()) {
+        last_toggle_tick = now;
+        hal_bridge::toggle_xiaozhi_chat_state();
+    }
+}
 
 LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(BUILTIN_ICON_FONT);
@@ -351,18 +369,7 @@ void StackChanAvatarDisplay::SetupUI()
 
     auto avatar = std::make_unique<DefaultAvatar>();
     avatar->init(lv_screen_active());
-    avatar->getPanel()->onClick().connect([]() {
-        static uint32_t last_toggle_tick = 0;
-        const uint32_t now               = GetHAL().millis();
-        if (last_toggle_tick != 0 && now - last_toggle_tick < 2000) {
-            return;
-        }
-
-        if (hal_bridge::is_xiaozhi_ready()) {
-            last_toggle_tick = now;
-            hal_bridge::toggle_xiaozhi_chat_state();
-        }
-    });
+    avatar->getPanel()->onClick().connect([]() { ToggleChatFromScreenTap(); });
 
     stackchan.attachAvatar(std::move(avatar));
     stackchan.addModifier(std::make_unique<BreathModifier>());
@@ -378,6 +385,9 @@ void StackChanAvatarDisplay::SetupUI()
     dashboard_image_ = lv_image_create(lv_screen_active());
     lv_obj_set_size(dashboard_image_, 320, 240);
     lv_obj_align(dashboard_image_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(dashboard_image_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(
+        dashboard_image_, [](lv_event_t*) { ToggleChatFromScreenTap(); }, LV_EVENT_CLICKED, nullptr);
     lv_obj_add_flag(dashboard_image_, LV_OBJ_FLAG_HIDDEN);
 
     media_screen_ = std::make_unique<StackChanMediaScreen>();
@@ -902,7 +912,6 @@ void StackChanAvatarDisplay::SetTheme(Theme* theme)
     }
 }
 
-#include <hal/board/hal_bridge.h>
 static bool _is_xiaozhi_ready = false;
 static bool _is_xiaozhi_idle  = false;
 bool hal_bridge::is_xiaozhi_ready()
