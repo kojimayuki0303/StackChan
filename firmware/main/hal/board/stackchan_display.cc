@@ -381,6 +381,10 @@ void StackChanAvatarDisplay::SetupUI()
 
     media_screen_ = std::make_unique<StackChanMediaScreen>();
     media_screen_->Setup(lv_screen_active());
+    if (current_theme_ != nullptr) {
+        auto* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+        media_screen_->SetTextFont(lvgl_theme->text_font()->font());
+    }
 
     // Take the dashboard down while the head is being petted so the stock
     // HeadPetModifier reaction (happy face + heart/shy decorators) is not
@@ -881,6 +885,9 @@ void StackChanAvatarDisplay::SetTheme(Theme* theme)
     auto text_font  = lvgl_theme->text_font()->font();
 
     stackchan.avatar().setSpeechTextFont((void*)text_font);
+    if (media_screen_ != nullptr) {
+        media_screen_->SetTextFont(text_font);
+    }
 }
 
 #include <hal/board/hal_bridge.h>

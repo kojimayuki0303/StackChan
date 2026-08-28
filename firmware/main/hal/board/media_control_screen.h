@@ -12,6 +12,7 @@ public:
 
     void Setup(lv_obj_t* parent);
     void SetState(bool active, bool playing, const char* title, const char* subtitle);
+    void SetTextFont(const lv_font_t* font);
     bool IsActive() const { return active_; }
 
 private:
@@ -29,6 +30,7 @@ private:
     lv_obj_t* title_ = nullptr;
     lv_obj_t* subtitle_ = nullptr;
     lv_obj_t* play_label_ = nullptr;
+    std::array<lv_obj_t*, 4> action_labels_{};
     bool active_ = false;
     bool playing_ = false;
     std::atomic_bool request_in_progress_{false};

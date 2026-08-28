@@ -75,12 +75,28 @@ void StackChanMediaScreen::Setup(lv_obj_t* parent)
 
     button_contexts_ = {{{this, Action::Previous}, {this, Action::PlayPause},
                          {this, Action::Next}, {this, Action::Chat}}};
-    CreateButton(root_, &button_contexts_[0], "前", 20, 86, 76, 58);
-    play_label_ = CreateButton(root_, &button_contexts_[1], "一時停止", 108, 86, 104, 58);
-    CreateButton(root_, &button_contexts_[2], "次", 224, 86, 76, 58);
-    lv_obj_t* chat_label = CreateButton(root_, &button_contexts_[3], "チャットに戻る", 48, 166, 224, 52);
+    action_labels_[0] = CreateButton(root_, &button_contexts_[0], "前へ", 20, 86, 76, 58);
+    action_labels_[1] = CreateButton(root_, &button_contexts_[1], "一時停止", 108, 86, 104, 58);
+    play_label_ = action_labels_[1];
+    action_labels_[2] = CreateButton(root_, &button_contexts_[2], "次へ", 224, 86, 76, 58);
+    action_labels_[3] = CreateButton(root_, &button_contexts_[3], "チャットに戻る", 48, 166, 224, 52);
+    lv_obj_t* chat_label = action_labels_[3];
     lv_obj_set_style_bg_color(lv_obj_get_parent(chat_label), lv_color_hex(kPrimary), 0);
     lv_obj_add_flag(root_, LV_OBJ_FLAG_HIDDEN);
+}
+
+void StackChanMediaScreen::SetTextFont(const lv_font_t* font)
+{
+    if (root_ == nullptr || font == nullptr) {
+        return;
+    }
+    lv_obj_set_style_text_font(title_, font, 0);
+    lv_obj_set_style_text_font(subtitle_, font, 0);
+    for (lv_obj_t* label : action_labels_) {
+        if (label != nullptr) {
+            lv_obj_set_style_text_font(label, font, 0);
+        }
+    }
 }
 
 void StackChanMediaScreen::SetState(bool active, bool playing, const char* title, const char* subtitle)
