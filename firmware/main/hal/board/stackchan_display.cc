@@ -386,6 +386,7 @@ void StackChanAvatarDisplay::SetupUI()
         auto* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
         media_screen_->SetTextFont(lvgl_theme->text_font()->font());
     }
+    media_screen_->SetIconFont(&font_awesome_30_4);
 
     // Take the dashboard down while the head is being petted so the stock
     // HeadPetModifier reaction (happy face + heart/shy decorators) is not

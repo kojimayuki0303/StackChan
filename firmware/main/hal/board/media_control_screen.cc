@@ -1,11 +1,14 @@
 /* SPDX-License-Identifier: MIT */
 #include "media_control_screen.h"
+#include "media_artwork_loader.h"
 
 #include <application.h>
 #include <board.h>
 #include <esp_log.h>
+#include <esp_lvgl_port.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <font_awesome.h>
 #include <memory>
 #include <string>
 
@@ -34,6 +37,7 @@ lv_obj_t* StackChanMediaScreen::CreateButton(lv_obj_t* parent, ButtonContext* co
     lv_obj_set_pos(button, x, y);
     lv_obj_set_size(button, width, height);
     lv_obj_set_style_bg_color(button, lv_color_hex(kButton), 0);
+    lv_obj_set_style_bg_opa(button, LV_OPA_80, 0);
     lv_obj_set_style_radius(button, 12, 0);
     lv_obj_set_style_border_width(button, 0, 0);
     lv_obj_set_style_shadow_width(button, 0, 0);
@@ -57,6 +61,19 @@ void StackChanMediaScreen::Setup(lv_obj_t* parent)
     lv_obj_set_style_pad_all(root_, 0, 0);
     lv_obj_clear_flag(root_, LV_OBJ_FLAG_SCROLLABLE);
 
+    artwork_image_ = lv_image_create(root_);
+    lv_obj_align(artwork_image_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(artwork_image_, LV_OBJ_FLAG_HIDDEN);
+
+    artwork_overlay_ = lv_obj_create(root_);
+    lv_obj_set_size(artwork_overlay_, 320, 240);
+    lv_obj_align(artwork_overlay_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(artwork_overlay_, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(artwork_overlay_, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(artwork_overlay_, 0, 0);
+    lv_obj_set_style_radius(artwork_overlay_, 0, 0);
+    lv_obj_clear_flag(artwork_overlay_, LV_OBJ_FLAG_SCROLLABLE);
+
     title_ = lv_label_create(root_);
     lv_obj_set_width(title_, 292);
     lv_obj_align(title_, LV_ALIGN_TOP_MID, 0, 20);
@@ -75,11 +92,11 @@ void StackChanMediaScreen::Setup(lv_obj_t* parent)
 
     button_contexts_ = {{{this, Action::Previous}, {this, Action::PlayPause},
                          {this, Action::Next}, {this, Action::Chat}}};
-    action_labels_[0] = CreateButton(root_, &button_contexts_[0], "前へ", 20, 86, 76, 58);
-    action_labels_[1] = CreateButton(root_, &button_contexts_[1], "一時停止", 108, 86, 104, 58);
+    action_labels_[0] = CreateButton(root_, &button_contexts_[0], FONT_AWESOME_BACKWARD_STEP, 16, 172, 56, 52);
+    action_labels_[1] = CreateButton(root_, &button_contexts_[1], FONT_AWESOME_PAUSE, 88, 172, 56, 52);
     play_label_ = action_labels_[1];
-    action_labels_[2] = CreateButton(root_, &button_contexts_[2], "次へ", 224, 86, 76, 58);
-    action_labels_[3] = CreateButton(root_, &button_contexts_[3], "チャットに戻る", 48, 166, 224, 52);
+    action_labels_[2] = CreateButton(root_, &button_contexts_[2], FONT_AWESOME_FORWARD_STEP, 160, 172, 56, 52);
+    action_labels_[3] = CreateButton(root_, &button_contexts_[3], FONT_AWESOME_COMMENT, 232, 172, 56, 52);
     lv_obj_t* chat_label = action_labels_[3];
     lv_obj_set_style_bg_color(lv_obj_get_parent(chat_label), lv_color_hex(kPrimary), 0);
     lv_obj_add_flag(root_, LV_OBJ_FLAG_HIDDEN);
@@ -92,6 +109,13 @@ void StackChanMediaScreen::SetTextFont(const lv_font_t* font)
     }
     lv_obj_set_style_text_font(title_, font, 0);
     lv_obj_set_style_text_font(subtitle_, font, 0);
+}
+
+void StackChanMediaScreen::SetIconFont(const lv_font_t* font)
+{
+    if (root_ == nullptr || font == nullptr) {
+        return;
+    }
     for (lv_obj_t* label : action_labels_) {
         if (label != nullptr) {
             lv_obj_set_style_text_font(label, font, 0);
@@ -101,22 +125,71 @@ void StackChanMediaScreen::SetTextFont(const lv_font_t* font)
 
 void StackChanMediaScreen::SetState(bool active, bool playing, const char* title, const char* subtitle)
 {
+    const bool was_active = active_;
     active_ = active;
     playing_ = playing;
     if (root_ == nullptr) {
         return;
     }
     if (!active) {
+        artwork_generation_.fetch_add(1, std::memory_order_relaxed);
+        artwork_track_key_.clear();
+        ClearArtwork();
         lv_obj_add_flag(root_, LV_OBJ_FLAG_HIDDEN);
         return;
     }
-    lv_label_set_text(title_, title != nullptr && title[0] != '\0' ? title : "Spotify");
-    lv_label_set_text(subtitle_, subtitle != nullptr && subtitle[0] != '\0'
+    const char* display_title = title != nullptr && title[0] != '\0' ? title : "Spotify";
+    const char* display_subtitle = subtitle != nullptr && subtitle[0] != '\0'
                                      ? subtitle
-                                     : (playing ? "再生中" : "一時停止中"));
-    lv_label_set_text(play_label_, playing ? "一時停止" : "再生");
+                                     : (playing ? "再生中" : "一時停止中");
+    lv_label_set_text(title_, display_title);
+    lv_label_set_text(subtitle_, display_subtitle);
+    lv_label_set_text(play_label_, playing ? FONT_AWESOME_PAUSE : FONT_AWESOME_PLAY);
     lv_obj_remove_flag(root_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(root_);
+
+    const std::string track_key = std::string(display_title) + "\n" + display_subtitle;
+    if (!was_active || track_key != artwork_track_key_) {
+        artwork_track_key_ = track_key;
+        const uint32_t generation = artwork_generation_.fetch_add(1, std::memory_order_relaxed) + 1;
+        ClearArtwork();
+        StartArtworkFetch(generation);
+    }
+}
+
+void StackChanMediaScreen::ClearArtwork()
+{
+    if (artwork_image_ != nullptr) {
+        lv_obj_add_flag(artwork_image_, LV_OBJ_FLAG_HIDDEN);
+        lv_image_set_src(artwork_image_, nullptr);
+    }
+    artwork_cached_.reset();
+}
+
+void StackChanMediaScreen::StartArtworkFetch(uint32_t generation)
+{
+    MediaArtworkLoader::Fetch(generation, this, &StackChanMediaScreen::ArtworkLoaded);
+}
+
+void StackChanMediaScreen::ArtworkLoaded(
+    void* target, uint32_t generation, std::unique_ptr<LvglImage> image)
+{
+    auto* self = static_cast<StackChanMediaScreen*>(target);
+    if (self->artwork_generation_.load(std::memory_order_relaxed) != generation) {
+        return;
+    }
+    if (!lvgl_port_lock(30000)) {
+        ESP_LOGW(TAG, "Artwork fetch: failed to lock display");
+        return;
+    }
+    if (self->artwork_generation_.load(std::memory_order_relaxed) == generation &&
+        self->artwork_image_ != nullptr) {
+        self->artwork_cached_ = std::move(image);
+        lv_image_set_src(self->artwork_image_, self->artwork_cached_->image_dsc());
+        lv_obj_remove_flag(self->artwork_image_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_background(self->artwork_image_);
+    }
+    lvgl_port_unlock();
 }
 
 void StackChanMediaScreen::ButtonEvent(lv_event_t* event)
