@@ -1,8 +1,69 @@
 diff --git a/main/application.cc b/main/application.cc
-index d69d43d..3b6f07e 100644
+index d69d43d..bcd9e9b 100644
 --- a/main/application.cc
 +++ b/main/application.cc
-@@ -610,33 +610,36 @@ void Application::InitializeProtocol() {
+@@ -531,7 +531,7 @@ void Application::InitializeProtocol() {
+             } else if (strcmp(state->valuestring, "stop") == 0) {
+                 Schedule([this]() {
+                     if (GetDeviceState() == kDeviceStateSpeaking) {
+-                        if (listening_mode_ == kListeningModeManualStop) {
++                        if (media_mode_.load() || listening_mode_ == kListeningModeManualStop) {
+                             SetDeviceState(kDeviceStateIdle);
+                         } else {
+                             SetDeviceState(kDeviceStateListening);
+@@ -547,6 +547,51 @@ void Application::InitializeProtocol() {
+                     });
+                 }
+             }
++        } else if (strcmp(type->valuestring, "media") == 0) {
++            auto state = cJSON_GetObjectItem(root, "state");
++            if (!cJSON_IsString(state)) {
++                ESP_LOGW(TAG, "Media command requires state");
++                return;
++            }
++            const std::string media_state = state->valuestring;
++            const bool active = media_state != "chat";
++            const bool playing = media_state == "playing";
++            std::string title;
++            std::string subtitle;
++            auto track = cJSON_GetObjectItem(root, "track");
++            if (cJSON_IsObject(track)) {
++                auto name = cJSON_GetObjectItem(track, "name");
++                auto artists = cJSON_GetObjectItem(track, "artists");
++                if (cJSON_IsString(name)) {
++                    title = name->valuestring;
++                }
++                if (cJSON_IsString(artists)) {
++                    subtitle = artists->valuestring;
++                } else if (cJSON_IsArray(artists)) {
++                    cJSON* artist = nullptr;
++                    cJSON_ArrayForEach(artist, artists) {
++                        if (!cJSON_IsString(artist)) {
++                            continue;
++                        }
++                        if (!subtitle.empty()) {
++                            subtitle += " / ";
++                        }
++                        subtitle += artist->valuestring;
++                    }
++                }
++            }
++            media_mode_.store(active);
++            Schedule([this, display, active, playing, title = std::move(title), subtitle = std::move(subtitle)]() {
++                display->SetMediaPlayback(active, playing, title.c_str(), subtitle.c_str());
++                if (!active) {
++                    return;
++                }
++                if (playing && GetDeviceState() != kDeviceStateSpeaking) {
++                    SetDeviceState(kDeviceStateSpeaking);
++                } else if (!playing && GetDeviceState() != kDeviceStateIdle) {
++                    SetDeviceState(kDeviceStateIdle);
++                }
++            });
+         } else if (strcmp(type->valuestring, "stt") == 0) {
+             auto text = cJSON_GetObjectItem(root, "text");
+             if (cJSON_IsString(text)) {
+@@ -610,33 +655,36 @@ void Application::InitializeProtocol() {
  }
  
  void Application::ShowActivationCode(const std::string& code, const std::string& message) {
@@ -39,7 +100,7 @@ index d69d43d..3b6f07e 100644
 +    // };
 +    // static const std::array<digit_sound, 10> digit_sounds{{
 +    //     digit_sound{'0', Lang::Sounds::OGG_0},
-+    //     digit_sound{'1', Lang::Sounds::OGG_1}, 
++    //     digit_sound{'1', Lang::Sounds::OGG_1},
 +    //     digit_sound{'2', Lang::Sounds::OGG_2},
 +    //     digit_sound{'3', Lang::Sounds::OGG_3},
 +    //     digit_sound{'4', Lang::Sounds::OGG_4},
@@ -66,6 +127,95 @@ index d69d43d..3b6f07e 100644
  }
  
  void Application::Alert(const char* status, const char* message, const char* emotion, const std::string_view& sound) {
+@@ -672,6 +720,10 @@ void Application::StopListening() {
+ }
+ 
+ void Application::HandleToggleChatEvent() {
++    if (media_mode_.load()) {
++        ESP_LOGI(TAG, "Ignoring chat toggle while media mode is active");
++        return;
++    }
+     auto state = GetDeviceState();
+     
+     if (state == kDeviceStateActivating) {
+@@ -726,6 +778,10 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
+ }
+ 
+ void Application::HandleStartListeningEvent() {
++    if (media_mode_.load()) {
++        ESP_LOGI(TAG, "Ignoring listen request while media mode is active");
++        return;
++    }
+     auto state = GetDeviceState();
+     
+     if (state == kDeviceStateActivating) {
+@@ -774,6 +830,10 @@ void Application::HandleStopListeningEvent() {
+ }
+ 
+ void Application::HandleWakeWordDetectedEvent() {
++    if (media_mode_.load()) {
++        ESP_LOGI(TAG, "Ignoring wake word while media mode is active");
++        return;
++    }
+     if (!protocol_) {
+         return;
+     }
+@@ -868,7 +928,7 @@ void Application::HandleStateChangedEvent() {
+             display->ClearChatMessages();  // Clear messages first
+             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
+             audio_service_.EnableVoiceProcessing(false);
+-            audio_service_.EnableWakeWordDetection(true);
++            audio_service_.EnableWakeWordDetection(!media_mode_.load());
+             break;
+         case kDeviceStateConnecting:
+             display->SetStatus(Lang::Strings::CONNECTING);
+@@ -911,8 +971,11 @@ void Application::HandleStateChangedEvent() {
+ 
+             if (listening_mode_ != kListeningModeRealtime) {
+                 audio_service_.EnableVoiceProcessing(false);
+-                // Only AFE wake word can be detected in speaking mode
+-                audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
++                // Wake word detection stays off while speaking: the
++                // speaker's own audio (voice responses, and especially
++                // continuous music playback) was triggering false wake
++                // detections. Interruption while speaking is tap-only now.
++                audio_service_.EnableWakeWordDetection(false);
+             }
+             audio_service_.ResetDecoder();
+             break;
+@@ -1116,4 +1179,3 @@ void Application::ResetProtocol() {
+         protocol_.reset();
+     });
+ }
+-
+diff --git a/main/application.h b/main/application.h
+index 7ca7af4..fef2052 100644
+--- a/main/application.h
++++ b/main/application.h
+@@ -10,6 +10,7 @@
+ #include <mutex>
+ #include <deque>
+ #include <memory>
++#include <atomic>
+ 
+ #include "protocol.h"
+ #include "ota.h"
+@@ -65,6 +66,7 @@ public:
+ 
+     DeviceState GetDeviceState() const { return state_machine_.GetState(); }
+     bool IsVoiceDetected() const { return audio_service_.IsVoiceDetected(); }
++    bool IsMediaMode() const { return media_mode_.load(); }
+     
+     /**
+      * Request state transition
+@@ -140,6 +142,7 @@ private:
+     bool aborted_ = false;
+     bool assets_version_checked_ = false;
+     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
++    std::atomic_bool media_mode_{false};
+     int clock_ticks_ = 0;
+     TaskHandle_t activation_task_handle_ = nullptr;
+ 
 diff --git a/main/assets.cc b/main/assets.cc
 index ad61944..6b84daf 100644
 --- a/main/assets.cc
@@ -245,6 +395,22 @@ index 3692e0c..7bfbc5c 100644
      
      // Strategy instance
      std::unique_ptr<AssetStrategy> strategy_;
+diff --git a/main/audio/audio_codec.cc b/main/audio/audio_codec.cc
+index 03e2baa..2ae0383 100644
+--- a/main/audio/audio_codec.cc
++++ b/main/audio/audio_codec.cc
+@@ -28,7 +28,11 @@ bool AudioCodec::InputData(std::vector<int16_t>& data) {
+ 
+ void AudioCodec::Start() {
+     Settings settings("audio", false);
++#if CONFIG_STACKCHAN_VOICE_VOLUME > 0
++    output_volume_ = CONFIG_STACKCHAN_VOICE_VOLUME;
++#else
+     output_volume_ = settings.GetInt("output_volume", output_volume_);
++#endif
+     if (output_volume_ <= 0) {
+         ESP_LOGW(TAG, "Output volume value (%d) is too small, setting to default (10)", output_volume_);
+         output_volume_ = 10;
 diff --git a/main/boards/common/i2c_device.cc b/main/boards/common/i2c_device.cc
 index 835997d..ea50d51 100644
 --- a/main/boards/common/i2c_device.cc
@@ -271,3 +437,31 @@ index 7bc917b..874b137 100644
  };
  
  #endif // I2C_DEVICE_H
+diff --git a/main/display/display.cc b/main/display/display.cc
+index 50fc1c5..7b35996 100644
+--- a/main/display/display.cc
++++ b/main/display/display.cc
+@@ -49,6 +49,11 @@ void Display::ClearChatMessages() {
+     // Default empty implementation, override in subclasses if needed
+ }
+ 
++void Display::SetMediaPlayback(bool active, bool playing, const char* title, const char* subtitle) {
++    ESP_LOGI(TAG, "Media playback: active=%d playing=%d title=%s subtitle=%s",
++        active, playing, title ? title : "", subtitle ? subtitle : "");
++}
++
+ void Display::SetTheme(Theme* theme) {
+     current_theme_ = theme;
+     Settings settings("display", true);
+diff --git a/main/display/display.h b/main/display/display.h
+index 9e73014..11e8de2 100644
+--- a/main/display/display.h
++++ b/main/display/display.h
+@@ -36,6 +36,7 @@ public:
+     virtual void SetEmotion(const char* emotion);
+     virtual void SetChatMessage(const char* role, const char* content);
+     virtual void ClearChatMessages();
++    virtual void SetMediaPlayback(bool active, bool playing, const char* title, const char* subtitle);
+     virtual void SetTheme(Theme* theme);
+     virtual Theme* GetTheme() { return current_theme_; }
+     virtual void UpdateStatusBar(bool update_all = false);
