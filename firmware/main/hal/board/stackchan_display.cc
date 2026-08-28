@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <src/misc/cache/lv_cache.h>
 #include <settings.h>
+#include <system_info.h>
 #include <lvgl.h>
 #include <lvgl_theme.h>
 #include <stackchan/stackchan.h>
@@ -769,6 +770,16 @@ void StackChanAvatarDisplay::DashboardFetchTask(void* arg)
         }
 
         const std::string url = CONFIG_STACKCHAN_DASHBOARD_URL;
+        Settings websocket_settings("websocket", false);
+        std::string token = websocket_settings.GetString("token");
+        if (!token.empty()) {
+            if (token.find(" ") == std::string::npos) {
+                token = "Bearer " + token;
+            }
+            http->SetHeader("Authorization", token.c_str());
+        }
+        http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
+        http->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
         if (!http->Open("GET", url)) {
             ESP_LOGW(TAG, "Dashboard fetch: failed to open %s", url.c_str());
             break;
