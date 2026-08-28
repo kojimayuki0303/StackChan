@@ -4,12 +4,17 @@
  * SPDX-License-Identifier: MIT
  */
 #include "stackchan_display.h"
+#include "media_control_screen.h"
 #include <esp_log.h>
 #include <esp_err.h>
 #include <esp_lvgl_port.h>
 #include <esp_psram.h>
+#include <esp_heap_caps.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <vector>
 #include <cstring>
+#include <stdexcept>
 #include <src/misc/cache/lv_cache.h>
 #include <settings.h>
 #include <lvgl.h>
@@ -17,11 +22,19 @@
 #include <stackchan/stackchan.h>
 #include <assets/lang_config.h>
 #include <hal/hal.h>
+#include <board.h>
+#include <display/lvgl_display/lvgl_image.h>
 
 using namespace stackchan;
 using namespace stackchan::avatar;
 
 #define TAG "StackChanAvatarDisplay"
+
+// How long the dashboard stays down after the last head-pet gesture.
+// Slightly longer than HeadPetModifier's own restore delay (3000 ms) so the
+// avatar has finished going back to its previous emotion and pose before the
+// dashboard covers the face again.
+static constexpr uint64_t kDashboardHeadPetRestoreDelayMs = 3500;
 
 LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(BUILTIN_ICON_FONT);
@@ -179,6 +192,61 @@ StackChanAvatarDisplay::StackChanAvatarDisplay(esp_lcd_panel_io_handle_t panel_i
     };
     esp_timer_create(&preview_timer_args, &preview_timer_);
 
+    // Idle-screen dashboard: only active when a URL is configured
+    dashboard_enabled_ = strlen(CONFIG_STACKCHAN_DASHBOARD_URL) > 0;
+
+    esp_timer_create_args_t dashboard_idle_timer_args = {
+        .callback =
+            [](void* arg) {
+                StackChanAvatarDisplay* display = static_cast<StackChanAvatarDisplay*>(arg);
+                display->OnDashboardIdleDelayElapsed();
+            },
+        .arg                   = this,
+        .dispatch_method       = ESP_TIMER_TASK,
+        .name                  = "dash_idle_timer",
+        .skip_unhandled_events = true,
+    };
+    esp_timer_create(&dashboard_idle_timer_args, &dashboard_idle_timer_);
+
+    esp_timer_create_args_t dashboard_refresh_timer_args = {
+        .callback =
+            [](void* arg) {
+                StackChanAvatarDisplay* display = static_cast<StackChanAvatarDisplay*>(arg);
+                display->OnDashboardRefreshTimer();
+            },
+        .arg                   = this,
+        .dispatch_method       = ESP_TIMER_TASK,
+        .name                  = "dash_refresh_timer",
+        .skip_unhandled_events = true,
+    };
+    esp_timer_create(&dashboard_refresh_timer_args, &dashboard_refresh_timer_);
+
+    esp_timer_create_args_t dashboard_pet_timer_args = {
+        .callback =
+            [](void* arg) {
+                StackChanAvatarDisplay* display = static_cast<StackChanAvatarDisplay*>(arg);
+                display->OnDashboardPetTimerElapsed();
+            },
+        .arg                   = this,
+        .dispatch_method       = ESP_TIMER_TASK,
+        .name                  = "dash_pet_timer",
+        .skip_unhandled_events = true,
+    };
+    esp_timer_create(&dashboard_pet_timer_args, &dashboard_pet_timer_);
+
+    esp_timer_create_args_t dashboard_pet_kick_timer_args = {
+        .callback =
+            [](void* arg) {
+                StackChanAvatarDisplay* display = static_cast<StackChanAvatarDisplay*>(arg);
+                display->SuspendDashboardForHeadPet();
+            },
+        .arg                   = this,
+        .dispatch_method       = ESP_TIMER_TASK,
+        .name                  = "dash_pet_kick_timer",
+        .skip_unhandled_events = true,
+    };
+    esp_timer_create(&dashboard_pet_kick_timer_args, &dashboard_pet_kick_timer_);
+
     // Create boot logo label if not warm boot
     if (GetHAL().getWarmRebootTarget() < 0) {
         ESP_LOGI(TAG, "Create boot logo label");
@@ -206,6 +274,35 @@ StackChanAvatarDisplay::~StackChanAvatarDisplay()
     if (preview_image_ != nullptr) {
         lv_obj_del(preview_image_);
     }
+
+    // Invalidate any in-flight dashboard fetch task before tearing down state it
+    // would otherwise touch.
+    dashboard_generation_.fetch_add(1, std::memory_order_relaxed);
+
+    if (dashboard_idle_timer_ != nullptr) {
+        esp_timer_stop(dashboard_idle_timer_);
+        esp_timer_delete(dashboard_idle_timer_);
+    }
+    if (dashboard_refresh_timer_ != nullptr) {
+        esp_timer_stop(dashboard_refresh_timer_);
+        esp_timer_delete(dashboard_refresh_timer_);
+    }
+    if (dashboard_pet_kick_timer_ != nullptr) {
+        esp_timer_stop(dashboard_pet_kick_timer_);
+        esp_timer_delete(dashboard_pet_kick_timer_);
+    }
+    if (dashboard_pet_timer_ != nullptr) {
+        esp_timer_stop(dashboard_pet_timer_);
+        esp_timer_delete(dashboard_pet_timer_);
+    }
+    if (head_pet_signal_connection_ >= 0) {
+        GetHAL().onHeadPetGesture.disconnect(head_pet_signal_connection_);
+        head_pet_signal_connection_ = -1;
+    }
+    if (dashboard_image_ != nullptr) {
+        lv_obj_del(dashboard_image_);
+    }
+    media_screen_.reset();
 
     auto& stackchan = GetStackChan();
     if (stackchan.hasAvatar()) {
@@ -276,6 +373,41 @@ void StackChanAvatarDisplay::SetupUI()
     lv_obj_set_size(preview_image_, 320, 240);
     lv_obj_align(preview_image_, LV_ALIGN_CENTER, 0, 0);
     lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
+
+    dashboard_image_ = lv_image_create(lv_screen_active());
+    lv_obj_set_size(dashboard_image_, 320, 240);
+    lv_obj_align(dashboard_image_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(dashboard_image_, LV_OBJ_FLAG_HIDDEN);
+
+    media_screen_ = std::make_unique<StackChanMediaScreen>();
+    media_screen_->Setup(lv_screen_active());
+
+    // Take the dashboard down while the head is being petted so the stock
+    // HeadPetModifier reaction (happy face + heart/shy decorators) is not
+    // covered by it. Only the actual petting gestures count: a bare Press is
+    // ignored because it does not trigger the reaction either.
+    head_pet_signal_connection_ = GetHAL().onHeadPetGesture.connect([this](HeadPetGesture gesture) {
+        const bool petting = (gesture == HeadPetGesture::SwipeForward || gesture == HeadPetGesture::SwipeBackward);
+        // A Release restarts the restore delay (the same way HeadPetModifier
+        // restarts its own), but only once petting has actually taken the
+        // dashboard down.
+        const bool petting_ended =
+            (gesture == HeadPetGesture::Release && dashboard_pet_suspended_.load(std::memory_order_relaxed));
+        if (!petting && !petting_ended) {
+            return;
+        }
+        if (!dashboard_enabled_ || dashboard_pet_kick_timer_ == nullptr) {
+            return;
+        }
+
+        // Must not block here: uitk::Signal::emit() holds its mutex across this
+        // call, so waiting on the LVGL lock would stall the head-touch task and
+        // starve every other slot - HeadPetModifier included. Hand the work to
+        // the esp_timer task instead. Return values are ignored on purpose: a
+        // kick that is already queued does the same job.
+        esp_timer_stop(dashboard_pet_kick_timer_);
+        esp_timer_start_once(dashboard_pet_kick_timer_, 0);
+    });
 
     // GetHAL().startStackChanAutoUpdate(24);
 
@@ -414,6 +546,24 @@ void StackChanAvatarDisplay::ClearChatMessages()
     ESP_LOGI(TAG, "Chat messages cleared");
 }
 
+void StackChanAvatarDisplay::SetMediaPlayback(bool active, bool playing, const char* title, const char* subtitle)
+{
+    if (active) {
+        HideDashboard();
+    }
+    DisplayLockGuard lock(this);
+    if (media_screen_ != nullptr) {
+        media_screen_->SetState(active, playing, title, subtitle);
+    }
+    if (active) {
+        // Spotify uses the same audio decoder path as assistant speech, but
+        // blue would misleadingly look like an open conversation. Media mode
+        // has its own screen, so keep the body lamp off.
+        GetHAL().setRgbColor(0, 0, 0, 0);
+        GetHAL().refreshRgb();
+    }
+}
+
 void StackChanAvatarDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image)
 {
     DisplayLockGuard lock(this);
@@ -441,6 +591,274 @@ void StackChanAvatarDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image)
     lv_obj_move_foreground(preview_image_);
     esp_timer_stop(preview_timer_);
     ESP_ERROR_CHECK(esp_timer_start_once(preview_timer_, 6000 * 1000));
+}
+
+/* -------------------------------------------------------------------------- */
+/*                             Idle-screen dashboard                          */
+/* -------------------------------------------------------------------------- */
+//
+// State machine:
+//   idle enter (SetStatus(STANDBY)) -> StartDashboardIdleWatch()
+//       arms a one-shot timer for CONFIG_STACKCHAN_DASHBOARD_IDLE_DELAY_SECONDS.
+//   idle-delay timer fires -> OnDashboardIdleDelayElapsed()
+//       if still idle: kicks off the first fetch and arms the periodic
+//       refresh timer (CONFIG_STACKCHAN_DASHBOARD_REFRESH_SECONDS).
+//   refresh timer fires -> OnDashboardRefreshTimer()
+//       if still idle and no fetch already in flight: kicks off another fetch.
+//   any idle exit (SetStatus() with a non-STANDBY status), SetPowerSaveMode(true),
+//   or destruction -> HideDashboard()
+//       hides the image instantly, stops both timers, and bumps
+//       dashboard_generation_ so a fetch that is already in flight discards
+//       its result instead of popping the dashboard back up after wake.
+
+void StackChanAvatarDisplay::StartDashboardIdleWatch()
+{
+    if (!dashboard_enabled_ || dashboard_watch_active_) {
+        return;
+    }
+
+    dashboard_watch_active_ = true;
+    esp_timer_stop(dashboard_idle_timer_);
+    ESP_ERROR_CHECK(esp_timer_start_once(
+        dashboard_idle_timer_, static_cast<uint64_t>(CONFIG_STACKCHAN_DASHBOARD_IDLE_DELAY_SECONDS) * 1000000ULL));
+}
+
+void StackChanAvatarDisplay::HideDashboard()
+{
+    StopDashboardWatch();
+    DisplayLockGuard lock(this);
+    HideDashboardVisualLocked();
+}
+
+void StackChanAvatarDisplay::StopDashboardWatch()
+{
+    // Bump first so any fetch task currently running (or about to run) sees a
+    // stale generation and discards its result under lock instead of showing
+    // the dashboard after we've already left idle.
+    dashboard_generation_.fetch_add(1, std::memory_order_relaxed);
+    dashboard_watch_active_ = false;
+
+    if (dashboard_idle_timer_ != nullptr) {
+        esp_timer_stop(dashboard_idle_timer_);
+    }
+    if (dashboard_refresh_timer_ != nullptr) {
+        esp_timer_stop(dashboard_refresh_timer_);
+    }
+    if (dashboard_pet_kick_timer_ != nullptr) {
+        esp_timer_stop(dashboard_pet_kick_timer_);
+    }
+    if (dashboard_pet_timer_ != nullptr) {
+        esp_timer_stop(dashboard_pet_timer_);
+    }
+    dashboard_pet_suspended_.store(false, std::memory_order_relaxed);
+}
+
+void StackChanAvatarDisplay::HideDashboardVisualLocked()
+{
+    if (dashboard_image_ == nullptr) {
+        return;
+    }
+    lv_obj_add_flag(dashboard_image_, LV_OBJ_FLAG_HIDDEN);
+    dashboard_image_cached_.reset();
+}
+
+void StackChanAvatarDisplay::OnDashboardIdleDelayElapsed()
+{
+    if (!dashboard_watch_active_ || !hal_bridge::is_xiaozhi_idle()) {
+        return;
+    }
+
+    StartDashboardFetch();
+
+    esp_timer_stop(dashboard_refresh_timer_);
+    ESP_ERROR_CHECK(esp_timer_start_periodic(
+        dashboard_refresh_timer_, static_cast<uint64_t>(CONFIG_STACKCHAN_DASHBOARD_REFRESH_SECONDS) * 1000000ULL));
+}
+
+void StackChanAvatarDisplay::OnDashboardRefreshTimer()
+{
+    if (!dashboard_watch_active_ || !hal_bridge::is_xiaozhi_idle()) {
+        return;
+    }
+
+    if (dashboard_fetch_in_progress_.load(std::memory_order_relaxed)) {
+        ESP_LOGW(TAG, "Dashboard fetch still in progress, skipping this refresh tick");
+        return;
+    }
+
+    StartDashboardFetch();
+}
+
+void StackChanAvatarDisplay::StartDashboardFetch()
+{
+    bool expected = false;
+    if (!dashboard_fetch_in_progress_.compare_exchange_strong(expected, true)) {
+        // A fetch is already running.
+        return;
+    }
+
+    auto* ctx      = new DashboardFetchContext{this, dashboard_generation_.load(std::memory_order_relaxed)};
+    BaseType_t res = xTaskCreate(&StackChanAvatarDisplay::DashboardFetchTask, "dash_fetch", 6144, ctx, 3, nullptr);
+    if (res != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create dashboard fetch task");
+        delete ctx;
+        dashboard_fetch_in_progress_.store(false, std::memory_order_relaxed);
+    }
+}
+
+void StackChanAvatarDisplay::SuspendDashboardForHeadPet()
+{
+    if (!dashboard_enabled_ || !dashboard_watch_active_ || dashboard_pet_timer_ == nullptr) {
+        return;
+    }
+
+    if (!dashboard_pet_suspended_.exchange(true, std::memory_order_relaxed)) {
+        // First gesture of this petting session: uncover the face. The decoded
+        // frame is kept in dashboard_image_cached_ so it can be put back up
+        // without another fetch.
+        DisplayLockGuard lock(this);
+        if (dashboard_image_ != nullptr) {
+            lv_obj_add_flag(dashboard_image_, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    // Re-arm on every gesture so the dashboard only returns once the petting
+    // has actually stopped.
+    esp_timer_stop(dashboard_pet_timer_);
+    esp_timer_start_once(dashboard_pet_timer_, kDashboardHeadPetRestoreDelayMs * 1000ULL);
+}
+
+void StackChanAvatarDisplay::OnDashboardPetTimerElapsed()
+{
+    dashboard_pet_suspended_.store(false, std::memory_order_relaxed);
+
+    if (!dashboard_watch_active_ || !hal_bridge::is_xiaozhi_idle()) {
+        // Left idle while being petted - SetStatus() already hid the dashboard.
+        return;
+    }
+
+    {
+        DisplayLockGuard lock(this);
+        if (dashboard_image_ != nullptr && dashboard_image_cached_ != nullptr) {
+            lv_obj_remove_flag(dashboard_image_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(dashboard_image_);
+            return;
+        }
+    }
+
+    // No cached frame (never fetched, or it was dropped) - pull a fresh one.
+    StartDashboardFetch();
+}
+
+void StackChanAvatarDisplay::DashboardFetchTask(void* arg)
+{
+    std::unique_ptr<DashboardFetchContext> ctx(static_cast<DashboardFetchContext*>(arg));
+    StackChanAvatarDisplay* self = ctx->self;
+    const uint32_t generation    = ctx->generation;
+
+    do {
+        auto network = Board::GetInstance().GetNetwork();
+        auto http    = network->CreateHttp(0);
+        if (http == nullptr) {
+            ESP_LOGW(TAG, "Dashboard fetch: failed to create HTTP client");
+            break;
+        }
+
+        const std::string url = CONFIG_STACKCHAN_DASHBOARD_URL;
+        if (!http->Open("GET", url)) {
+            ESP_LOGW(TAG, "Dashboard fetch: failed to open %s", url.c_str());
+            break;
+        }
+
+        int status_code = http->GetStatusCode();
+        if (status_code != 200) {
+            ESP_LOGW(TAG, "Dashboard fetch: unexpected status code %d", status_code);
+            http->Close();
+            break;
+        }
+
+        size_t content_length = http->GetBodyLength();
+        if (content_length == 0) {
+            ESP_LOGW(TAG, "Dashboard fetch: empty body");
+            http->Close();
+            break;
+        }
+
+        uint8_t* data = static_cast<uint8_t*>(heap_caps_malloc(content_length, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (data == nullptr) {
+            data = static_cast<uint8_t*>(heap_caps_malloc(content_length, MALLOC_CAP_8BIT));
+        }
+        if (data == nullptr) {
+            ESP_LOGW(TAG, "Dashboard fetch: failed to allocate %u bytes", (unsigned)content_length);
+            http->Close();
+            break;
+        }
+
+        size_t total_read = 0;
+        bool read_failed   = false;
+        while (total_read < content_length) {
+            int ret = http->Read(reinterpret_cast<char*>(data) + total_read, content_length - total_read);
+            if (ret < 0) {
+                ESP_LOGW(TAG, "Dashboard fetch: read error");
+                read_failed = true;
+                break;
+            }
+            if (ret == 0) {
+                break;
+            }
+            total_read += ret;
+        }
+        http->Close();
+
+        if (read_failed || total_read == 0) {
+            heap_caps_free(data);
+            break;
+        }
+
+        std::unique_ptr<LvglImage> image;
+        try {
+            image = std::make_unique<LvglAllocatedImage>(data, total_read);
+        } catch (const std::exception& e) {
+            ESP_LOGW(TAG, "Dashboard fetch: failed to decode image: %s", e.what());
+            heap_caps_free(data);
+            break;
+        }
+
+        // Discard the result if the dashboard was hidden (idle exited, power
+        // save entered, or the display is being destroyed) while we were
+        // fetching.
+        if (self->dashboard_generation_.load(std::memory_order_relaxed) != generation) {
+            ESP_LOGI(TAG, "Dashboard fetch: discarding stale result (no longer idle)");
+            break;
+        }
+
+        DisplayLockGuard lock(self);
+        // Re-check under lock: HideDashboard() may have bumped the generation
+        // just before we acquired it.
+        if (self->dashboard_generation_.load(std::memory_order_relaxed) != generation ||
+            self->dashboard_image_ == nullptr) {
+            break;
+        }
+
+        self->dashboard_image_cached_ = std::move(image);
+        auto img_dsc                  = self->dashboard_image_cached_->image_dsc();
+        lv_image_set_src(self->dashboard_image_, img_dsc);
+        if (img_dsc->header.w > 0) {
+            // Scale to fit width, same convention as SetPreviewImage().
+            lv_image_set_scale(self->dashboard_image_, 256 * self->width_ / img_dsc->header.w);
+        }
+        if (self->dashboard_pet_suspended_.load(std::memory_order_relaxed)) {
+            // The head is being petted right now: keep the freshly decoded
+            // frame cached but leave the face visible. OnDashboardPetTimerElapsed()
+            // will put it back up once the petting is over.
+            break;
+        }
+        lv_obj_remove_flag(self->dashboard_image_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(self->dashboard_image_);
+    } while (false);
+
+    self->dashboard_fetch_in_progress_.store(false, std::memory_order_relaxed);
+    vTaskDelete(nullptr);
 }
 
 void StackChanAvatarDisplay::UpdateStatusBar(bool update_all)
@@ -526,7 +944,11 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
             speaking_modifier_id_ = stackchan.addModifier(std::make_unique<SpeakingModifier>(0, 180, false));
         }
 
-        GetHAL().setRgbColor(0, 0, 0, 50);
+        if (media_screen_ != nullptr && media_screen_->IsActive()) {
+            GetHAL().setRgbColor(0, 0, 0, 0);
+        } else {
+            GetHAL().setRgbColor(0, 0, 0, 50);
+        }
         GetHAL().refreshRgb();
     } else {
         avatar.setSpeech(status);
@@ -543,6 +965,9 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         }
 
         _is_xiaozhi_idle = true;
+
+        // Start (or leave running) the idle-screen dashboard watch.
+        StartDashboardIdleWatch();
     } else {
         // Stop idle motion
         ESP_LOGW(TAG, "Stop idle motion");
@@ -560,6 +985,14 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         // }
 
         _is_xiaozhi_idle = false;
+
+        // Any non-idle status (wake word / listening / connecting / speaking, etc.)
+        // means the user is interacting - hide the dashboard instantly so the
+        // avatar face returns.
+        // SetStatus already owns the LVGL lock. Stop the timers/state first,
+        // then hide the visual without attempting a nested lvgl_port_lock.
+        StopDashboardWatch();
+        HideDashboardVisualLocked();
     }
 
     // Clear sleep state
@@ -570,4 +1003,20 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
 
 void StackChanAvatarDisplay::ShowNotification(const char* notification, int duration_ms)
 {
+}
+
+void StackChanAvatarDisplay::SetPowerSaveMode(bool on)
+{
+    if (on) {
+        // Screen is about to go dark (or the assistant is being shut down) -
+        // stop fetching/showing the dashboard until we wake back up.
+        HideDashboard();
+    } else if (hal_bridge::is_xiaozhi_idle()) {
+        // Waking up while still idle (no SetStatus() transition happens on
+        // its own here) - resume the idle-delay watch so the dashboard comes
+        // back after the usual delay.
+        StartDashboardIdleWatch();
+    }
+
+    LvglDisplay::SetPowerSaveMode(on);
 }

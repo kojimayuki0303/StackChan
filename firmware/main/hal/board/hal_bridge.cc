@@ -128,8 +128,14 @@ XiaozhiConfig_t get_xiaozhi_config()
                                                      static_cast<int>(config.idleShutdownTimeSeconds));
     config.allowShutdownWhenCharging =
         settings.GetBool(_xiaozhi_config_allow_shutdown_when_charging_key.data(), config.allowShutdownWhenCharging);
+#if CONFIG_STACKCHAN_AI_AGENT_AUTO_START
+    // Dedicated desk-assistant mode defaults to stillness while idle, but a
+    // level saved from the settings UI takes precedence.
+    config.idleRandomMovementLevel = settings.GetInt(_xiaozhi_config_idle_random_movement_key.data(), 0);
+#else
     config.idleRandomMovementLevel =
         settings.GetInt(_xiaozhi_config_idle_random_movement_key.data(), config.idleRandomMovementLevel);
+#endif
     config.startAiAgentOnBoot =
         settings.GetBool(_xiaozhi_config_start_ai_agent_on_boot_key.data(), config.startAiAgentOnBoot);
 

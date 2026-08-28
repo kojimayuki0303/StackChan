@@ -1,5 +1,20 @@
 menu "StackChan Server"
 
+config STACKCHAN_AI_AGENT_AUTO_START
+    bool "Start the AI Agent immediately after boot"
+    default n
+    help
+        Skip the launcher on a normal cold boot and start the voice assistant.
+        This is useful when StackChan is operated as a dedicated desk assistant.
+
+config STACKCHAN_VOICE_VOLUME
+    int "Dedicated voice-assistant speaker volume"
+    range 0 100
+    default 0
+    help
+        Override the saved speaker volume when greater than zero. A value of
+        zero preserves the standard firmware behavior.
+
 config STACKCHAN_SERVER_URL
     string "StackChan server base URL"
     default "http://47.113.125.164:12800"
@@ -8,6 +23,41 @@ config STACKCHAN_SERVER_URL
         The HAL composes endpoint paths like /stackChan/device/user,
         /stackChan/apps and /stackChan/ws from this base. Override in your
         sdkconfig.defaults.local to point at a self-hosted deployment.
+
+config STACKCHAN_DASHBOARD_URL
+    string "Idle-screen dashboard image URL"
+    default "http://192.168.68.67:8766/xiaozhi/dashboard.png"
+    help
+        Server-rendered PNG fetched over HTTP and shown full-screen over the
+        avatar while the voice assistant is idle. The image is refetched
+        periodically while shown, and hidden instantly whenever the user
+        starts interacting again. Leave empty to disable the idle dashboard
+        feature entirely.
+
+config STACKCHAN_DASHBOARD_IDLE_DELAY_SECONDS
+    int "Idle-screen dashboard: idle delay before showing (seconds)"
+    range 1 3600
+    default 20
+    help
+        How long the assistant must remain idle (STANDBY status) before the
+        dashboard image is first fetched and shown. Unused when
+        STACKCHAN_DASHBOARD_URL is empty.
+
+config STACKCHAN_DASHBOARD_REFRESH_SECONDS
+    int "Idle-screen dashboard: refresh interval while shown (seconds)"
+    range 5 3600
+    default 60
+    help
+        How often to refetch the dashboard image while it remains shown and
+        the assistant is still idle. Unused when STACKCHAN_DASHBOARD_URL is
+        empty.
+
+config STACKCHAN_MEDIA_API_URL
+    string "Media control API base URL"
+    default "http://192.168.68.67:8766/xiaozhi/media"
+    help
+        Base URL used by the playback screen buttons for play/pause,
+        previous track, next track, and returning to chat.
 
 endmenu
 
