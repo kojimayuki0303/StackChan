@@ -1,8 +1,23 @@
 diff --git a/main/application.cc b/main/application.cc
-index d69d43d..bcd9e9b 100644
+index d69d43d..cd21024 100644
 --- a/main/application.cc
 +++ b/main/application.cc
-@@ -531,7 +531,7 @@ void Application::InitializeProtocol() {
+@@ -512,7 +512,14 @@ void Application::InitializeProtocol() {
+     protocol_->OnAudioChannelClosed([this, &board]() {
+         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
++        // A transport failure can close the WebSocket before the Mac sends
++        // the final {"type":"media","state":"chat"} message.  Leaving
++        // media_mode_ set makes every later dashboard-triggered reconnect get
++        // rejected by HandleToggleChatEvent(), so the old artwork remains on
++        // screen indefinitely.
++        media_mode_.store(false);
+         Schedule([this]() {
+             auto display = Board::GetInstance().GetDisplay();
++            display->SetMediaPlayback(false, false, "", "");
+             display->SetChatMessage("system", "");
+             SetDeviceState(kDeviceStateIdle);
+         });
+@@ -531,7 +538,7 @@ void Application::InitializeProtocol() {
              } else if (strcmp(state->valuestring, "stop") == 0) {
                  Schedule([this]() {
                      if (GetDeviceState() == kDeviceStateSpeaking) {
@@ -11,7 +26,7 @@ index d69d43d..bcd9e9b 100644
                              SetDeviceState(kDeviceStateIdle);
                          } else {
                              SetDeviceState(kDeviceStateListening);
-@@ -547,6 +547,51 @@ void Application::InitializeProtocol() {
+@@ -547,6 +554,51 @@ void Application::InitializeProtocol() {
                      });
                  }
              }
@@ -63,7 +78,7 @@ index d69d43d..bcd9e9b 100644
          } else if (strcmp(type->valuestring, "stt") == 0) {
              auto text = cJSON_GetObjectItem(root, "text");
              if (cJSON_IsString(text)) {
-@@ -610,33 +655,36 @@ void Application::InitializeProtocol() {
+@@ -610,33 +662,36 @@ void Application::InitializeProtocol() {
  }
  
  void Application::ShowActivationCode(const std::string& code, const std::string& message) {
@@ -127,7 +142,7 @@ index d69d43d..bcd9e9b 100644
  }
  
  void Application::Alert(const char* status, const char* message, const char* emotion, const std::string_view& sound) {
-@@ -672,6 +720,10 @@ void Application::StopListening() {
+@@ -672,6 +727,10 @@ void Application::StopListening() {
  }
  
  void Application::HandleToggleChatEvent() {
@@ -138,7 +153,7 @@ index d69d43d..bcd9e9b 100644
      auto state = GetDeviceState();
      
      if (state == kDeviceStateActivating) {
-@@ -726,6 +778,10 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
+@@ -726,6 +785,10 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
  }
  
  void Application::HandleStartListeningEvent() {
@@ -149,7 +164,7 @@ index d69d43d..bcd9e9b 100644
      auto state = GetDeviceState();
      
      if (state == kDeviceStateActivating) {
-@@ -774,6 +830,10 @@ void Application::HandleStopListeningEvent() {
+@@ -774,6 +837,10 @@ void Application::HandleStopListeningEvent() {
  }
  
  void Application::HandleWakeWordDetectedEvent() {
@@ -160,7 +175,7 @@ index d69d43d..bcd9e9b 100644
      if (!protocol_) {
          return;
      }
-@@ -868,7 +928,7 @@ void Application::HandleStateChangedEvent() {
+@@ -868,7 +935,7 @@ void Application::HandleStateChangedEvent() {
              display->ClearChatMessages();  // Clear messages first
              display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
              audio_service_.EnableVoiceProcessing(false);
@@ -169,7 +184,7 @@ index d69d43d..bcd9e9b 100644
              break;
          case kDeviceStateConnecting:
              display->SetStatus(Lang::Strings::CONNECTING);
-@@ -911,8 +971,11 @@ void Application::HandleStateChangedEvent() {
+@@ -911,8 +978,11 @@ void Application::HandleStateChangedEvent() {
  
              if (listening_mode_ != kListeningModeRealtime) {
                  audio_service_.EnableVoiceProcessing(false);
@@ -183,7 +198,7 @@ index d69d43d..bcd9e9b 100644
              }
              audio_service_.ResetDecoder();
              break;
-@@ -1116,4 +1179,3 @@ void Application::ResetProtocol() {
+@@ -1116,4 +1186,3 @@ void Application::ResetProtocol() {
          protocol_.reset();
      });
  }
