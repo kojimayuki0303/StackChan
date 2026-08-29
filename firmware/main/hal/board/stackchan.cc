@@ -435,6 +435,10 @@ private:
         ESP_LOGI(TAG, "Init AW9523");
         aw9523_ = new Aw9523(i2c_bus_, 0x58);
         vTaskDelay(pdMS_TO_TICKS(50));
+        // The AW88298 amplifier reset line is driven by the AW9523. Merely
+        // leaving it high is not sufficient after an app-only flash or warm
+        // reboot; pulse reset so the codec is ready before first playback.
+        aw9523_->ResetAw88298();
     }
 
     void PollTouchpad()
