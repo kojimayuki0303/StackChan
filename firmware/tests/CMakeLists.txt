@@ -28,3 +28,15 @@ target_include_directories(media_track_identity_test PRIVATE
 target_compile_features(media_track_identity_test PRIVATE cxx_std_17)
 
 add_test(NAME media_track_identity_test COMMAND $<TARGET_FILE:media_track_identity_test>)
+
+add_executable(pmic_power_state_test
+    pmic_power_state_test.cpp
+)
+
+target_include_directories(pmic_power_state_test PRIVATE
+    ../main
+)
+
+target_compile_features(pmic_power_state_test PRIVATE cxx_std_17)
+
+add_test(NAME pmic_power_state_test COMMAND $<TARGET_FILE:pmic_power_state_test>)
