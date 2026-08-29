@@ -1,20 +1,25 @@
+import argparse
 import os
 import subprocess
 import json
 
 
 def clone_or_update_repo(
-    repo_url, path, ref=None, with_submodules=False, patch_path=None
+    repo_url, path, ref=None, with_submodules=False, patch_path=None, clean=False
 ):
-    import os
-
     if not os.path.exists(path):
         subprocess.run(["git", "clone", repo_url, path], check=True)
     else:
+        if clean:
+            subprocess.run(["git", "-C", path, "reset", "--hard"], check=True)
+            subprocess.run(["git", "-C", path, "clean", "-ffdx"], check=True)
         subprocess.run(["git", "-C", path, "fetch"], check=True)
 
     if ref:
-        subprocess.run(["git", "-C", path, "checkout", ref], check=True)
+        checkout = ["git", "-C", path, "checkout"]
+        if clean:
+            checkout.append("--force")
+        subprocess.run([*checkout, ref], check=True)
 
     if with_submodules:
         subprocess.run(
@@ -36,11 +41,13 @@ def clone_or_update_repo(
         if check_result.returncode == 0:
             subprocess.run(["git", "-C", path, "apply", patch_full_path], check=True)
             print(f"Applied patch {patch_path} to {path}")
+        elif clean:
+            raise subprocess.CalledProcessError(check_result.returncode, check_result.args)
         else:
             print(f"Patch {patch_path} cannot be applied cleanly to {path}, skipped.")
 
 
-def fetch_dependencies():
+def fetch_dependencies(clean=False):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(script_dir, "repos.json")
 
@@ -54,8 +61,20 @@ def fetch_dependencies():
         patch = repo.get("patch")
         if patch and not os.path.isabs(patch):
             patch = os.path.join(script_dir, patch)
-        clone_or_update_repo(repo["url"], repo_path, branch, with_submodules, patch)
+        clone_or_update_repo(
+            repo["url"], repo_path, branch, with_submodules, patch, clean=clean
+        )
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Reset and clean only repos.json dependency directories before checkout",
+    )
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    fetch_dependencies()
+    fetch_dependencies(clean=parse_args().clean)

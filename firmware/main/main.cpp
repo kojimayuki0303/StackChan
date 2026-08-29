@@ -26,8 +26,13 @@ extern "C" void app_main(void)
     ui_hal::on_delay([](uint32_t ms) { GetHAL().delay(ms); });
     ui_hal::on_get_tick([]() { return GetHAL().millis(); });
 
+#ifdef CONFIG_STACKCHAN_AI_AGENT_AUTO_START
+    constexpr bool kAutoStartConfigured = true;
+#else
+    constexpr bool kAutoStartConfigured = false;
+#endif
     const bool skip_mooncake =
-        (CONFIG_STACKCHAN_AI_AGENT_AUTO_START || GetHAL().getXiaozhiConfig().startAiAgentOnBoot) &&
+        (kAutoStartConfigured || GetHAL().getXiaozhiConfig().startAiAgentOnBoot) &&
         GetHAL().getWarmRebootTarget() < 0;
 
     if (!skip_mooncake) {

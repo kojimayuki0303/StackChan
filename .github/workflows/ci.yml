@@ -1,0 +1,52 @@
+name: CI
+
+# Pon-Chan / prodz Portal と同じ専用 Mac mini だけで検証する。
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  firmware:
+    runs-on: [self-hosted, macOS, ARM64, ci-macmini]
+    timeout-minutes: 45
+    env:
+      PONCHAN_ESP_IDF_PATH: /Users/ci-runner/.toolchains/esp-idf-v5.5.4
+      STACKCHAN_CI_CLEAN_DEPENDENCIES: "1"
+    steps:
+      - name: Remove stale checkout credentials
+        run: |
+          config="$GITHUB_WORKSPACE/.git/config"
+          [[ ! -L "$GITHUB_WORKSPACE" && ! -L "$GITHUB_WORKSPACE/.git" && ! -L "$config" ]]
+          if [[ -f "$config" ]]; then
+            git config --file "$config" --unset-all http.https://github.com/.extraheader || true
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run firmware regression gate
+        run: scripts/run_ci_gate.sh
+
+  required:
+    if: always()
+    needs: [firmware]
+    runs-on: [self-hosted, macOS, ARM64, ci-macmini]
+    timeout-minutes: 10
+    steps:
+      - name: Require firmware regression gate
+        env:
+          FIRMWARE_RESULT: ${{ needs.firmware.result }}
+        run: '[[ "$FIRMWARE_RESULT" == "success" ]]'
