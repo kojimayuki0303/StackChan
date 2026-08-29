@@ -439,6 +439,7 @@ private:
         // leaving it high is not sufficient after an app-only flash or warm
         // reboot; pulse reset so the codec is ready before first playback.
         aw9523_->ResetAw88298();
+        ESP_LOGI(TAG, "AW88298 boot reset complete");
     }
 
     void PollTouchpad()

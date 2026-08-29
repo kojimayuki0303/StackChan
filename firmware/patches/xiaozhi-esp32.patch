@@ -1,5 +1,5 @@
 diff --git a/main/application.cc b/main/application.cc
-index d69d43d..cd21024 100644
+index d69d43d..0e2034e 100644
 --- a/main/application.cc
 +++ b/main/application.cc
 @@ -512,7 +512,14 @@ void Application::InitializeProtocol() {
@@ -13,7 +13,7 @@ index d69d43d..cd21024 100644
 +        media_mode_.store(false);
          Schedule([this]() {
              auto display = Board::GetInstance().GetDisplay();
-+            display->SetMediaPlayback(false, false, "", "");
++            display->SetMediaPlayback(false, false, "", "", "");
              display->SetChatMessage("system", "");
              SetDeviceState(kDeviceStateIdle);
          });
@@ -26,7 +26,7 @@ index d69d43d..cd21024 100644
                              SetDeviceState(kDeviceStateIdle);
                          } else {
                              SetDeviceState(kDeviceStateListening);
-@@ -547,6 +554,51 @@ void Application::InitializeProtocol() {
+@@ -547,6 +554,60 @@ void Application::InitializeProtocol() {
                      });
                  }
              }
@@ -41,10 +41,18 @@ index d69d43d..cd21024 100644
 +            const bool playing = media_state == "playing";
 +            std::string title;
 +            std::string subtitle;
++            std::string track_identity;
 +            auto track = cJSON_GetObjectItem(root, "track");
 +            if (cJSON_IsObject(track)) {
++                auto uri = cJSON_GetObjectItem(track, "uri");
++                auto revision = cJSON_GetObjectItem(track, "artwork_revision");
 +                auto name = cJSON_GetObjectItem(track, "name");
 +                auto artists = cJSON_GetObjectItem(track, "artists");
++                if (cJSON_IsString(uri)) {
++                    track_identity = uri->valuestring;
++                } else if (cJSON_IsString(revision)) {
++                    track_identity = revision->valuestring;
++                }
 +                if (cJSON_IsString(name)) {
 +                    title = name->valuestring;
 +                }
@@ -64,8 +72,9 @@ index d69d43d..cd21024 100644
 +                }
 +            }
 +            media_mode_.store(active);
-+            Schedule([this, display, active, playing, title = std::move(title), subtitle = std::move(subtitle)]() {
-+                display->SetMediaPlayback(active, playing, title.c_str(), subtitle.c_str());
++            Schedule([this, display, active, playing, title = std::move(title), subtitle = std::move(subtitle),
++                      track_identity = std::move(track_identity)]() {
++                display->SetMediaPlayback(active, playing, title.c_str(), subtitle.c_str(), track_identity.c_str());
 +                if (!active) {
 +                    return;
 +                }
@@ -78,7 +87,7 @@ index d69d43d..cd21024 100644
          } else if (strcmp(type->valuestring, "stt") == 0) {
              auto text = cJSON_GetObjectItem(root, "text");
              if (cJSON_IsString(text)) {
-@@ -610,33 +662,36 @@ void Application::InitializeProtocol() {
+@@ -610,33 +671,36 @@ void Application::InitializeProtocol() {
  }
  
  void Application::ShowActivationCode(const std::string& code, const std::string& message) {
@@ -142,7 +151,7 @@ index d69d43d..cd21024 100644
  }
  
  void Application::Alert(const char* status, const char* message, const char* emotion, const std::string_view& sound) {
-@@ -672,6 +727,10 @@ void Application::StopListening() {
+@@ -672,6 +736,10 @@ void Application::StopListening() {
  }
  
  void Application::HandleToggleChatEvent() {
@@ -153,7 +162,7 @@ index d69d43d..cd21024 100644
      auto state = GetDeviceState();
      
      if (state == kDeviceStateActivating) {
-@@ -726,6 +785,10 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
+@@ -726,6 +794,10 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
  }
  
  void Application::HandleStartListeningEvent() {
@@ -164,7 +173,7 @@ index d69d43d..cd21024 100644
      auto state = GetDeviceState();
      
      if (state == kDeviceStateActivating) {
-@@ -774,6 +837,10 @@ void Application::HandleStopListeningEvent() {
+@@ -774,6 +846,10 @@ void Application::HandleStopListeningEvent() {
  }
  
  void Application::HandleWakeWordDetectedEvent() {
@@ -175,7 +184,7 @@ index d69d43d..cd21024 100644
      if (!protocol_) {
          return;
      }
-@@ -868,7 +935,7 @@ void Application::HandleStateChangedEvent() {
+@@ -868,7 +944,7 @@ void Application::HandleStateChangedEvent() {
              display->ClearChatMessages();  // Clear messages first
              display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
              audio_service_.EnableVoiceProcessing(false);
@@ -184,7 +193,7 @@ index d69d43d..cd21024 100644
              break;
          case kDeviceStateConnecting:
              display->SetStatus(Lang::Strings::CONNECTING);
-@@ -911,8 +978,11 @@ void Application::HandleStateChangedEvent() {
+@@ -911,8 +987,11 @@ void Application::HandleStateChangedEvent() {
  
              if (listening_mode_ != kListeningModeRealtime) {
                  audio_service_.EnableVoiceProcessing(false);
@@ -198,7 +207,7 @@ index d69d43d..cd21024 100644
              }
              audio_service_.ResetDecoder();
              break;
-@@ -1116,4 +1186,3 @@ void Application::ResetProtocol() {
+@@ -1116,4 +1195,3 @@ void Application::ResetProtocol() {
          protocol_.reset();
      });
  }
@@ -453,14 +462,15 @@ index 7bc917b..874b137 100644
  
  #endif // I2C_DEVICE_H
 diff --git a/main/display/display.cc b/main/display/display.cc
-index 50fc1c5..7b35996 100644
+index 50fc1c5..a3c8066 100644
 --- a/main/display/display.cc
 +++ b/main/display/display.cc
-@@ -49,6 +49,11 @@ void Display::ClearChatMessages() {
+@@ -49,6 +49,12 @@ void Display::ClearChatMessages() {
      // Default empty implementation, override in subclasses if needed
  }
  
-+void Display::SetMediaPlayback(bool active, bool playing, const char* title, const char* subtitle) {
++void Display::SetMediaPlayback(bool active, bool playing, const char* title, const char* subtitle,
++                               const char* track_identity) {
 +    ESP_LOGI(TAG, "Media playback: active=%d playing=%d title=%s subtitle=%s",
 +        active, playing, title ? title : "", subtitle ? subtitle : "");
 +}
@@ -469,14 +479,15 @@ index 50fc1c5..7b35996 100644
      current_theme_ = theme;
      Settings settings("display", true);
 diff --git a/main/display/display.h b/main/display/display.h
-index 9e73014..11e8de2 100644
+index 9e73014..68e6b00 100644
 --- a/main/display/display.h
 +++ b/main/display/display.h
-@@ -36,6 +36,7 @@ public:
+@@ -36,6 +36,8 @@ public:
      virtual void SetEmotion(const char* emotion);
      virtual void SetChatMessage(const char* role, const char* content);
      virtual void ClearChatMessages();
-+    virtual void SetMediaPlayback(bool active, bool playing, const char* title, const char* subtitle);
++    virtual void SetMediaPlayback(bool active, bool playing, const char* title, const char* subtitle,
++                                  const char* track_identity);
      virtual void SetTheme(Theme* theme);
      virtual Theme* GetTheme() { return current_theme_; }
      virtual void UpdateStatusBar(bool update_all = false);

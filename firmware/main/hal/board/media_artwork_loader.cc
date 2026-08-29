@@ -8,20 +8,49 @@
 #include <freertos/task.h>
 #include <memory>
 #include <string>
+#include <utility>
 
 #define TAG "MediaArtworkLoader"
 
 namespace {
 constexpr size_t kMaxArtworkBytes = 512 * 1024;
+
+std::string UrlEncode(const std::string& value)
+{
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    std::string encoded;
+    encoded.reserve(value.size());
+    for (const unsigned char byte : value) {
+        if ((byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') ||
+            (byte >= '0' && byte <= '9') || byte == '-' || byte == '_' || byte == '.' || byte == '~') {
+            encoded.push_back(static_cast<char>(byte));
+        } else {
+            encoded.push_back('%');
+            encoded.push_back(kHex[byte >> 4]);
+            encoded.push_back(kHex[byte & 0x0F]);
+        }
+    }
+    return encoded;
+}
 }
 
-void MediaArtworkLoader::Fetch(uint32_t generation, void* target, Callback callback)
+void MediaArtworkLoader::Fetch(uint32_t generation, const std::string& track_identity, void* target,
+                               Callback callback, const std::shared_ptr<CallbackGate>& gate)
 {
-    auto* context = new FetchContext{generation, target, callback};
+    auto* context = new FetchContext{generation, track_identity, target, callback, gate};
     if (xTaskCreate(&MediaArtworkLoader::FetchTask, "media_artwork", 6144, context, 3, nullptr) != pdPASS) {
         ESP_LOGW(TAG, "Failed to create artwork fetch task");
         delete context;
     }
+}
+
+void MediaArtworkLoader::Close(const std::shared_ptr<CallbackGate>& gate)
+{
+    if (gate == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(gate->mutex);
+    gate->closed = true;
 }
 
 void MediaArtworkLoader::FetchTask(void* arg)
@@ -36,7 +65,10 @@ void MediaArtworkLoader::FetchTask(void* arg)
             ESP_LOGW(TAG, "Failed to create HTTP client");
             break;
         }
-        const std::string url = std::string(CONFIG_STACKCHAN_MEDIA_API_URL) + "/artwork";
+        std::string url = std::string(CONFIG_STACKCHAN_MEDIA_API_URL) + "/artwork";
+        if (!context->track_identity.empty()) {
+            url += "?identity=" + UrlEncode(context->track_identity);
+        }
         if (!http->Open("GET", url)) {
             ESP_LOGW(TAG, "Failed to open %s", url.c_str());
             break;
@@ -84,6 +116,18 @@ void MediaArtworkLoader::FetchTask(void* arg)
         } catch (const std::exception& error) {
             ESP_LOGW(TAG, "Failed to decode image: %s", error.what());
             heap_caps_free(data);
+            break;
+        }
+        if (context->gate == nullptr) {
+            ESP_LOGW(TAG, "Artwork fetch: callback gate is missing");
+            break;
+        }
+        // Hold the gate while invoking the target callback. Close() therefore
+        // cannot return until a callback already in progress has finished,
+        // eliminating the target-after-destruction race.
+        std::lock_guard<std::mutex> callback_lock(context->gate->mutex);
+        if (context->gate->closed) {
+            ESP_LOGI(TAG, "Artwork fetch: discarding result after screen close");
             break;
         }
         context->callback(context->target, context->generation, std::move(image));

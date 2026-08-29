@@ -100,7 +100,8 @@ public:
     virtual void SetEmotion(const char* emotion) override;
     virtual void SetChatMessage(const char* role, const char* content) override;
     virtual void ClearChatMessages() override;
-    virtual void SetMediaPlayback(bool active, bool playing, const char* title, const char* subtitle) override;
+    virtual void SetMediaPlayback(bool active, bool playing, const char* title, const char* subtitle,
+                                  const char* track_identity) override;
     virtual void SetPreviewImage(std::unique_ptr<LvglImage> image) override;
     virtual void UpdateStatusBar(bool update_all = false) override;
     virtual void SetupUI() override;

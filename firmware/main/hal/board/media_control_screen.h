@@ -8,6 +8,7 @@
 #include <lvgl.h>
 
 #include <display/lvgl_display/lvgl_image.h>
+#include "media_artwork_loader.h"
 
 class ScreenSwipeGesture;
 
@@ -17,7 +18,8 @@ public:
     ~StackChanMediaScreen();
 
     void Setup(lv_obj_t* parent, ScreenSwipeGesture* swipe_gesture = nullptr);
-    void SetState(bool active, bool playing, const char* title, const char* subtitle);
+    void SetState(bool active, bool playing, const char* title, const char* subtitle,
+                  const char* track_identity = nullptr);
     void SetVisible(bool visible);
     void SetTextFont(const lv_font_t* font);
     void SetIconFont(const lv_font_t* font);
@@ -32,6 +34,7 @@ private:
     struct RequestContext {
         StackChanMediaScreen* screen;
         Action action;
+        std::shared_ptr<MediaArtworkLoader::CallbackGate> gate;
     };
 
     lv_obj_t* root_ = nullptr;
@@ -44,6 +47,8 @@ private:
     std::unique_ptr<LvglImage> artwork_cached_ = nullptr;
     std::string artwork_track_key_;
     std::atomic<uint32_t> artwork_generation_{0};
+    std::shared_ptr<MediaArtworkLoader::CallbackGate> artwork_callback_gate_ =
+        std::make_shared<MediaArtworkLoader::CallbackGate>();
     bool active_ = false;
     bool playing_ = false;
     std::atomic_bool request_in_progress_{false};
@@ -53,7 +58,7 @@ private:
     lv_obj_t* CreateButton(lv_obj_t* parent, ButtonContext* context, const char* text,
                            int x, int y, int width, int height);
     void StartRequest(Action action);
-    void StartArtworkFetch(uint32_t generation);
+    void StartArtworkFetch(uint32_t generation, const std::string& track_identity);
     void ClearArtwork();
     static void ButtonEvent(lv_event_t* event);
     static void RequestTask(void* arg);

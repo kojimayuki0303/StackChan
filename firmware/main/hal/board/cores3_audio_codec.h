@@ -18,7 +18,20 @@ private:
     esp_codec_dev_handle_t output_dev_ = nullptr;
     esp_codec_dev_handle_t input_dev_ = nullptr;
 
+    // Lightweight output-path telemetry.  These counters make an otherwise
+    // silent codec/I2S failure distinguishable from an upstream no-data
+    // failure in the serial log without dumping PCM or running a watchdog.
+    uint64_t output_write_count_ = 0;
+    uint64_t output_nonzero_write_count_ = 0;
+    uint64_t output_write_error_count_ = 0;
+    uint64_t output_disabled_write_count_ = 0;
+    uint64_t output_empty_write_count_ = 0;
+    uint64_t output_frames_written_ = 0;
+    uint32_t output_last_report_ms_ = 0;
+    bool output_first_nonzero_reported_ = false;
+
     void CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din);
+    void ReportOutputTelemetry(bool force = false);
 
     virtual int Read(int16_t* dest, int samples) override;
     virtual int Write(const int16_t* data, int samples) override;

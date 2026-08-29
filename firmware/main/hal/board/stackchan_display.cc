@@ -570,12 +570,13 @@ void StackChanAvatarDisplay::ClearChatMessages()
     ESP_LOGI(TAG, "Chat messages cleared");
 }
 
-void StackChanAvatarDisplay::SetMediaPlayback(bool active, bool playing, const char* title, const char* subtitle)
+void StackChanAvatarDisplay::SetMediaPlayback(bool active, bool playing, const char* title, const char* subtitle,
+                                              const char* track_identity)
 {
     DisplayLockGuard lock(this);
     if (media_screen_ != nullptr) {
         const bool was_active = media_screen_->IsActive();
-        media_screen_->SetState(active, playing, title, subtitle);
+        media_screen_->SetState(active, playing, title, subtitle, track_identity);
         if (active && !was_active) {
             display_mode_ = DisplayMode::Spotify;
             manual_display_mode_ = true;
