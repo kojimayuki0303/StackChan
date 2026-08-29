@@ -922,6 +922,19 @@ void StackChanAvatarDisplay::DashboardFetchTask(void* arg)
             break;
         }
 
+        // Spotify playback is an explicit action in the Spotify app, not an
+        // acoustic trigger.  After a reboot there is no voice WebSocket yet,
+        // so the process-scoped Mac FIFO reader would otherwise drain audio
+        // without having a StackChan session to forward it to.  Reuse the
+        // authenticated dashboard poll to request that music-only session.
+        if (http->GetResponseHeader("X-Ponchan-Media-Active") == "1" &&
+            hal_bridge::is_xiaozhi_ready() && hal_bridge::is_xiaozhi_idle()) {
+            ESP_LOGI(TAG, "Spotify playback detected while idle; opening music session");
+            http->Close();
+            hal_bridge::toggle_xiaozhi_chat_state();
+            break;
+        }
+
         size_t content_length = http->GetBodyLength();
         if (content_length == 0) {
             ESP_LOGW(TAG, "Dashboard fetch: empty body");
