@@ -367,9 +367,16 @@ void StackChanAvatarDisplay::SetupUI()
 
     ESP_LOGI(TAG, "Creating Stack-chan Avatar...");
 
+    screen_swipe_gesture_ =
+        std::make_unique<ScreenSwipeGesture>(&StackChanAvatarDisplay::ScreenSwipeCallback, this);
     auto avatar = std::make_unique<DefaultAvatar>();
     avatar->init(lv_screen_active());
-    avatar->getPanel()->onClick().connect([]() { ToggleChatFromScreenTap(); });
+    screen_swipe_gesture_->Attach(avatar->getPanel()->get());
+    avatar->getPanel()->onClick().connect([this]() {
+        if (screen_swipe_gesture_ == nullptr || !screen_swipe_gesture_->ShouldSuppressClick()) {
+            ToggleChatFromScreenTap();
+        }
+    });
 
     stackchan.attachAvatar(std::move(avatar));
     stackchan.addModifier(std::make_unique<BreathModifier>());
@@ -386,12 +393,13 @@ void StackChanAvatarDisplay::SetupUI()
     lv_obj_set_size(dashboard_image_, 320, 240);
     lv_obj_align(dashboard_image_, LV_ALIGN_CENTER, 0, 0);
     lv_obj_add_flag(dashboard_image_, LV_OBJ_FLAG_CLICKABLE);
+    screen_swipe_gesture_->Attach(dashboard_image_);
     lv_obj_add_event_cb(
-        dashboard_image_, [](lv_event_t*) { ToggleChatFromScreenTap(); }, LV_EVENT_CLICKED, nullptr);
+        dashboard_image_, &StackChanAvatarDisplay::DashboardEventHandler, LV_EVENT_CLICKED, this);
     lv_obj_add_flag(dashboard_image_, LV_OBJ_FLAG_HIDDEN);
 
     media_screen_ = std::make_unique<StackChanMediaScreen>();
-    media_screen_->Setup(lv_screen_active());
+    media_screen_->Setup(lv_screen_active(), screen_swipe_gesture_.get());
     if (current_theme_ != nullptr) {
         auto* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
         media_screen_->SetTextFont(lvgl_theme->text_font()->font());
@@ -564,12 +572,18 @@ void StackChanAvatarDisplay::ClearChatMessages()
 
 void StackChanAvatarDisplay::SetMediaPlayback(bool active, bool playing, const char* title, const char* subtitle)
 {
-    if (active) {
-        HideDashboard();
-    }
     DisplayLockGuard lock(this);
     if (media_screen_ != nullptr) {
+        const bool was_active = media_screen_->IsActive();
         media_screen_->SetState(active, playing, title, subtitle);
+        if (active && !was_active) {
+            display_mode_ = DisplayMode::Spotify;
+            manual_display_mode_ = true;
+        } else if (!active && was_active) {
+            display_mode_ = DisplayMode::Dashboard;
+            manual_display_mode_ = false;
+        }
+        ApplyDisplayModeLocked();
     }
     if (active) {
         // Spotify uses the same audio decoder path as assistant speech, but
@@ -578,6 +592,88 @@ void StackChanAvatarDisplay::SetMediaPlayback(bool active, bool playing, const c
         GetHAL().setRgbColor(0, 0, 0, 0);
         GetHAL().refreshRgb();
     }
+}
+
+void StackChanAvatarDisplay::ScreenSwipeCallback(void* context, ScreenSwipeDirection direction)
+{
+    auto* self = static_cast<StackChanAvatarDisplay*>(context);
+    if (self != nullptr) {
+        self->OnScreenSwipe(direction);
+    }
+}
+
+void StackChanAvatarDisplay::DashboardEventHandler(lv_event_t* event)
+{
+    auto* self = static_cast<StackChanAvatarDisplay*>(lv_event_get_user_data(event));
+    if (self == nullptr || self->screen_swipe_gesture_ == nullptr ||
+        self->screen_swipe_gesture_->ShouldSuppressClick()) {
+        return;
+    }
+    ToggleChatFromScreenTap();
+}
+
+void StackChanAvatarDisplay::OnScreenSwipe(ScreenSwipeDirection direction)
+{
+    const bool spotify_available = media_screen_ != nullptr && media_screen_->IsActive();
+    if (!spotify_available) {
+        display_mode_ = display_mode_ == DisplayMode::Codex ? DisplayMode::Dashboard : DisplayMode::Codex;
+    } else if (direction == ScreenSwipeDirection::Left) {
+        switch (display_mode_) {
+            case DisplayMode::Spotify: display_mode_ = DisplayMode::Codex; break;
+            case DisplayMode::Codex: display_mode_ = DisplayMode::Dashboard; break;
+            case DisplayMode::Dashboard: display_mode_ = DisplayMode::Spotify; break;
+        }
+    } else {
+        switch (display_mode_) {
+            case DisplayMode::Spotify: display_mode_ = DisplayMode::Dashboard; break;
+            case DisplayMode::Dashboard: display_mode_ = DisplayMode::Codex; break;
+            case DisplayMode::Codex: display_mode_ = DisplayMode::Spotify; break;
+        }
+    }
+
+    manual_display_mode_ = true;
+    StopDashboardWatch();
+    ApplyDisplayModeLocked();
+}
+
+void StackChanAvatarDisplay::ApplyDisplayModeLocked()
+{
+    const bool show_spotify =
+        display_mode_ == DisplayMode::Spotify && media_screen_ != nullptr && media_screen_->IsActive();
+    if (media_screen_ != nullptr) {
+        media_screen_->SetVisible(show_spotify);
+    }
+
+    if (show_spotify) {
+        StopDashboardWatch();
+        HideDashboardVisualLocked();
+        return;
+    }
+
+    if (manual_display_mode_ &&
+        (display_mode_ == DisplayMode::Codex || display_mode_ == DisplayMode::Dashboard)) {
+        ShowManualDashboardLocked();
+    } else if (hal_bridge::is_xiaozhi_idle()) {
+        StartDashboardIdleWatch();
+    }
+}
+
+void StackChanAvatarDisplay::ShowManualDashboardLocked()
+{
+    if (!dashboard_enabled_) {
+        return;
+    }
+    dashboard_watch_active_ = true;
+    if (dashboard_idle_timer_ != nullptr) {
+        esp_timer_stop(dashboard_idle_timer_);
+    }
+    if (dashboard_refresh_timer_ != nullptr) {
+        esp_timer_stop(dashboard_refresh_timer_);
+        ESP_ERROR_CHECK(esp_timer_start_periodic(
+            dashboard_refresh_timer_,
+            static_cast<uint64_t>(CONFIG_STACKCHAN_DASHBOARD_REFRESH_SECONDS) * 1000000ULL));
+    }
+    StartDashboardFetch();
 }
 
 void StackChanAvatarDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image)
@@ -629,7 +725,18 @@ void StackChanAvatarDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image)
 
 void StackChanAvatarDisplay::StartDashboardIdleWatch()
 {
-    if (!dashboard_enabled_ || dashboard_watch_active_) {
+    if (!dashboard_enabled_) {
+        return;
+    }
+
+    if (manual_display_mode_ &&
+        (display_mode_ == DisplayMode::Codex || display_mode_ == DisplayMode::Dashboard)) {
+        if (!dashboard_watch_active_) {
+            ShowManualDashboardLocked();
+        }
+        return;
+    }
+    if (dashboard_watch_active_) {
         return;
     }
 
@@ -680,7 +787,8 @@ void StackChanAvatarDisplay::HideDashboardVisualLocked()
 
 void StackChanAvatarDisplay::OnDashboardIdleDelayElapsed()
 {
-    if (!dashboard_watch_active_ || !hal_bridge::is_xiaozhi_idle()) {
+    if (!dashboard_watch_active_ ||
+        (!manual_display_mode_ && !hal_bridge::is_xiaozhi_idle())) {
         return;
     }
 
@@ -693,7 +801,8 @@ void StackChanAvatarDisplay::OnDashboardIdleDelayElapsed()
 
 void StackChanAvatarDisplay::OnDashboardRefreshTimer()
 {
-    if (!dashboard_watch_active_ || !hal_bridge::is_xiaozhi_idle()) {
+    if (!dashboard_watch_active_ ||
+        (!manual_display_mode_ && !hal_bridge::is_xiaozhi_idle())) {
         return;
     }
 
@@ -713,7 +822,12 @@ void StackChanAvatarDisplay::StartDashboardFetch()
         return;
     }
 
-    auto* ctx      = new DashboardFetchContext{this, dashboard_generation_.load(std::memory_order_relaxed)};
+    auto* ctx = new DashboardFetchContext{
+        this,
+        dashboard_generation_.load(std::memory_order_relaxed),
+        display_mode_,
+        manual_display_mode_,
+    };
     BaseType_t res = xTaskCreate(&StackChanAvatarDisplay::DashboardFetchTask, "dash_fetch", 6144, ctx, 3, nullptr);
     if (res != pdPASS) {
         ESP_LOGE(TAG, "Failed to create dashboard fetch task");
@@ -780,7 +894,12 @@ void StackChanAvatarDisplay::DashboardFetchTask(void* arg)
             break;
         }
 
-        const std::string url = CONFIG_STACKCHAN_DASHBOARD_URL;
+        std::string url = CONFIG_STACKCHAN_DASHBOARD_URL;
+        if (ctx->manual_display_mode &&
+            (ctx->display_mode == DisplayMode::Codex || ctx->display_mode == DisplayMode::Dashboard)) {
+            url += url.find('?') == std::string::npos ? "?view=" : "&view=";
+            url += ctx->display_mode == DisplayMode::Codex ? "codex" : "dashboard";
+        }
         Settings websocket_settings("websocket", false);
         std::string token = websocket_settings.GetString("token");
         if (!token.empty()) {
@@ -883,7 +1002,11 @@ void StackChanAvatarDisplay::DashboardFetchTask(void* arg)
         lv_obj_move_foreground(self->dashboard_image_);
     } while (false);
 
+    const bool stale = self->dashboard_generation_.load(std::memory_order_relaxed) != generation;
     self->dashboard_fetch_in_progress_.store(false, std::memory_order_relaxed);
+    if (stale && self->dashboard_watch_active_) {
+        self->StartDashboardFetch();
+    }
     vTaskDelete(nullptr);
 }
 

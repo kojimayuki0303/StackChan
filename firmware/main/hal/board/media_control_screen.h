@@ -9,13 +9,16 @@
 
 #include <display/lvgl_display/lvgl_image.h>
 
+class ScreenSwipeGesture;
+
 class StackChanMediaScreen {
 public:
     StackChanMediaScreen() = default;
     ~StackChanMediaScreen();
 
-    void Setup(lv_obj_t* parent);
+    void Setup(lv_obj_t* parent, ScreenSwipeGesture* swipe_gesture = nullptr);
     void SetState(bool active, bool playing, const char* title, const char* subtitle);
+    void SetVisible(bool visible);
     void SetTextFont(const lv_font_t* font);
     void SetIconFont(const lv_font_t* font);
     bool IsActive() const { return active_; }
@@ -45,6 +48,7 @@ private:
     bool playing_ = false;
     std::atomic_bool request_in_progress_{false};
     std::array<ButtonContext, 4> button_contexts_{};
+    ScreenSwipeGesture* swipe_gesture_ = nullptr;
 
     lv_obj_t* CreateButton(lv_obj_t* parent, ButtonContext* context, const char* text,
                            int x, int y, int width, int height);
