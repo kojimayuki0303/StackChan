@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "media_control_screen.h"
 #include "media_artwork_loader.h"
+#include "screen_swipe_gesture.h"
 
 #include <application.h>
 #include <board.h>
@@ -42,6 +43,9 @@ lv_obj_t* StackChanMediaScreen::CreateButton(lv_obj_t* parent, ButtonContext* co
     lv_obj_set_style_border_width(button, 0, 0);
     lv_obj_set_style_shadow_width(button, 0, 0);
     lv_obj_add_event_cb(button, &StackChanMediaScreen::ButtonEvent, LV_EVENT_CLICKED, context);
+    if (swipe_gesture_ != nullptr) {
+        swipe_gesture_->Attach(button);
+    }
     lv_obj_t* label = lv_label_create(button);
     lv_label_set_text(label, text);
     lv_obj_set_style_text_color(label, lv_color_hex(kText), 0);
@@ -49,8 +53,9 @@ lv_obj_t* StackChanMediaScreen::CreateButton(lv_obj_t* parent, ButtonContext* co
     return label;
 }
 
-void StackChanMediaScreen::Setup(lv_obj_t* parent)
+void StackChanMediaScreen::Setup(lv_obj_t* parent, ScreenSwipeGesture* swipe_gesture)
 {
+    swipe_gesture_ = swipe_gesture;
     root_ = lv_obj_create(parent);
     lv_obj_set_size(root_, 320, 240);
     lv_obj_align(root_, LV_ALIGN_CENTER, 0, 0);
@@ -60,6 +65,9 @@ void StackChanMediaScreen::Setup(lv_obj_t* parent)
     lv_obj_set_style_radius(root_, 0, 0);
     lv_obj_set_style_pad_all(root_, 0, 0);
     lv_obj_clear_flag(root_, LV_OBJ_FLAG_SCROLLABLE);
+    if (swipe_gesture_ != nullptr) {
+        swipe_gesture_->Attach(root_);
+    }
 
     artwork_image_ = lv_image_create(root_);
     lv_obj_align(artwork_image_, LV_ALIGN_CENTER, 0, 0);
@@ -145,15 +153,25 @@ void StackChanMediaScreen::SetState(bool active, bool playing, const char* title
     lv_label_set_text(title_, display_title);
     lv_label_set_text(subtitle_, display_subtitle);
     lv_label_set_text(play_label_, playing ? FONT_AWESOME_PAUSE : FONT_AWESOME_PLAY);
-    lv_obj_remove_flag(root_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(root_);
-
     const std::string track_key = std::string(display_title) + "\n" + display_subtitle;
     if (!was_active || track_key != artwork_track_key_) {
         artwork_track_key_ = track_key;
         const uint32_t generation = artwork_generation_.fetch_add(1, std::memory_order_relaxed) + 1;
         ClearArtwork();
         StartArtworkFetch(generation);
+    }
+}
+
+void StackChanMediaScreen::SetVisible(bool visible)
+{
+    if (root_ == nullptr) {
+        return;
+    }
+    if (visible && active_) {
+        lv_obj_remove_flag(root_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(root_);
+    } else {
+        lv_obj_add_flag(root_, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -195,7 +213,9 @@ void StackChanMediaScreen::ArtworkLoaded(
 void StackChanMediaScreen::ButtonEvent(lv_event_t* event)
 {
     auto* context = static_cast<ButtonContext*>(lv_event_get_user_data(event));
-    if (context != nullptr && context->screen != nullptr) {
+    if (context != nullptr && context->screen != nullptr &&
+        (context->screen->swipe_gesture_ == nullptr ||
+         !context->screen->swipe_gesture_->ShouldSuppressClick())) {
         context->screen->StartRequest(context->action);
     }
 }

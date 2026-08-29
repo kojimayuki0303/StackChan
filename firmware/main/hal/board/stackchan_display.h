@@ -11,9 +11,12 @@
 #include <atomic>
 #include <memory>
 #include "media_control_screen.h"
+#include "screen_swipe_gesture.h"
 
 class StackChanAvatarDisplay : public LvglDisplay {
 private:
+    enum class DisplayMode { Spotify, Codex, Dashboard };
+
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
     esp_lcd_panel_handle_t panel_       = nullptr;
     int speaking_modifier_id_           = -1;
@@ -27,6 +30,9 @@ private:
     esp_timer_handle_t preview_timer_                = nullptr;
     std::unique_ptr<LvglImage> preview_image_cached_ = nullptr;
     std::unique_ptr<StackChanMediaScreen> media_screen_ = nullptr;
+    std::unique_ptr<ScreenSwipeGesture> screen_swipe_gesture_ = nullptr;
+    DisplayMode display_mode_ = DisplayMode::Dashboard;
+    bool manual_display_mode_ = false;
 
     // Idle-screen dashboard: shows a server-rendered PNG full-screen over the
     // avatar after the assistant has been idle for a while. See
@@ -67,10 +73,17 @@ private:
     struct DashboardFetchContext {
         StackChanAvatarDisplay* self;
         uint32_t generation;
+        DisplayMode display_mode;
+        bool manual_display_mode;
     };
     static void DashboardFetchTask(void* arg);
     void SuspendDashboardForHeadPet();
     void OnDashboardPetTimerElapsed();
+    void ApplyDisplayModeLocked();
+    void ShowManualDashboardLocked();
+    void OnScreenSwipe(ScreenSwipeDirection direction);
+    static void ScreenSwipeCallback(void* context, ScreenSwipeDirection direction);
+    static void DashboardEventHandler(lv_event_t* event);
 
 protected:
     virtual bool Lock(int timeout_ms = 0) override;
