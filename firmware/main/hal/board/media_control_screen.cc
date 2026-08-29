@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "media_control_screen.h"
 #include "media_artwork_loader.h"
+#include "media_track_identity.h"
 #include "screen_swipe_gesture.h"
 
 #include <application.h>
@@ -25,6 +26,9 @@ constexpr uint32_t kMuted = 0x9AA8B2;
 
 StackChanMediaScreen::~StackChanMediaScreen()
 {
+    // Invalidate and synchronize artwork callbacks before destroying LVGL
+    // objects.  The loader may still be blocked in HTTP I/O at this point.
+    MediaArtworkLoader::Close(artwork_callback_gate_);
     if (root_ != nullptr) {
         lv_obj_del(root_);
         root_ = nullptr;
@@ -131,7 +135,8 @@ void StackChanMediaScreen::SetIconFont(const lv_font_t* font)
     }
 }
 
-void StackChanMediaScreen::SetState(bool active, bool playing, const char* title, const char* subtitle)
+void StackChanMediaScreen::SetState(bool active, bool playing, const char* title, const char* subtitle,
+                                    const char* track_identity)
 {
     const bool was_active = active_;
     active_ = active;
@@ -153,12 +158,19 @@ void StackChanMediaScreen::SetState(bool active, bool playing, const char* title
     lv_label_set_text(title_, display_title);
     lv_label_set_text(subtitle_, display_subtitle);
     lv_label_set_text(play_label_, playing ? FONT_AWESOME_PAUSE : FONT_AWESOME_PLAY);
-    const std::string track_key = std::string(display_title) + "\n" + display_subtitle;
+    // URI is stable across status polls and remains the source of truth when
+    // title/artist text is localized or duplicated.  Keep the display-field
+    // fallback for older senders that do not yet provide an identity.
+    const std::string stable_identity = track_identity != nullptr ? track_identity : "";
+    const std::string track_key = media_track::Key(track_identity, display_title, display_subtitle);
     if (!was_active || track_key != artwork_track_key_) {
         artwork_track_key_ = track_key;
         const uint32_t generation = artwork_generation_.fetch_add(1, std::memory_order_relaxed) + 1;
         ClearArtwork();
-        StartArtworkFetch(generation);
+        // The generation key may fall back to presentation text for legacy
+        // senders, but only a sender-provided identity can safely bind the
+        // HTTP response to a specific track.
+        StartArtworkFetch(generation, stable_identity);
     }
 }
 
@@ -184,9 +196,10 @@ void StackChanMediaScreen::ClearArtwork()
     artwork_cached_.reset();
 }
 
-void StackChanMediaScreen::StartArtworkFetch(uint32_t generation)
+void StackChanMediaScreen::StartArtworkFetch(uint32_t generation, const std::string& track_identity)
 {
-    MediaArtworkLoader::Fetch(generation, this, &StackChanMediaScreen::ArtworkLoaded);
+    MediaArtworkLoader::Fetch(generation, track_identity, this, &StackChanMediaScreen::ArtworkLoaded,
+                              artwork_callback_gate_);
 }
 
 void StackChanMediaScreen::ArtworkLoaded(
@@ -237,7 +250,7 @@ void StackChanMediaScreen::StartRequest(Action action)
     if (!request_in_progress_.compare_exchange_strong(expected, true)) {
         return;
     }
-    auto* context = new RequestContext{this, action};
+    auto* context = new RequestContext{this, action, artwork_callback_gate_};
     if (xTaskCreate(&StackChanMediaScreen::RequestTask, "media_control", 4096, context, 3, nullptr) != pdPASS) {
         delete context;
         request_in_progress_.store(false);
@@ -272,6 +285,11 @@ void StackChanMediaScreen::RequestTask(void* arg)
     if (success && context->action == Action::Chat) {
         Application::GetInstance().ToggleChatState();
     }
-    self->request_in_progress_.store(false);
+    if (context->gate != nullptr) {
+        std::lock_guard<std::mutex> lock(context->gate->mutex);
+        if (!context->gate->closed) {
+            self->request_in_progress_.store(false);
+        }
+    }
     vTaskDelete(nullptr);
 }

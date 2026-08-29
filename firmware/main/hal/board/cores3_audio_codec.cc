@@ -223,12 +223,27 @@ void CoreS3AudioCodec::EnableOutput(bool enable) {
             .sample_rate = (uint32_t)output_sample_rate_,
             .mclk_multiple = 0,
         };
-        ESP_ERROR_CHECK(esp_codec_dev_open(output_dev_, &fs));
-        ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, output_volume_));
+        ESP_LOGI(TAG, "Opening output codec: rate=%d channels=%d volume=%d", output_sample_rate_, fs.channel,
+                 output_volume_);
+        const esp_err_t open_err = esp_codec_dev_open(output_dev_, &fs);
+        if (open_err != ESP_OK) {
+            ESP_LOGE(TAG, "Output codec open failed: %s", esp_err_to_name(open_err));
+            ReportOutputTelemetry(true);
+            return;
+        }
+        const esp_err_t volume_err = esp_codec_dev_set_out_vol(output_dev_, output_volume_);
+        if (volume_err != ESP_OK) {
+            ESP_LOGE(TAG, "Output volume setup failed: %s", esp_err_to_name(volume_err));
+            esp_codec_dev_close(output_dev_);
+            ReportOutputTelemetry(true);
+            return;
+        }
+        ESP_LOGI(TAG, "Output codec open/output enabled");
     } else {
         ESP_ERROR_CHECK(esp_codec_dev_close(output_dev_));
     }
     AudioCodec::EnableOutput(enable);
+    ReportOutputTelemetry(true);
 }
 
 int CoreS3AudioCodec::Read(int16_t* dest, int samples) {
@@ -239,8 +254,58 @@ int CoreS3AudioCodec::Read(int16_t* dest, int samples) {
 }
 
 int CoreS3AudioCodec::Write(const int16_t* data, int samples) {
-    if (output_enabled_) {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_write(output_dev_, (void*)data, samples * sizeof(int16_t)));
+    if (!output_enabled_) {
+        output_disabled_write_count_++;
+        if (output_disabled_write_count_ == 1) {
+            ESP_LOGW(TAG, "Audio output write dropped while codec is disabled: samples=%d", samples);
+        }
+        ReportOutputTelemetry(false);
+        return 0;
     }
+    if (data == nullptr || samples <= 0) {
+        output_empty_write_count_++;
+        ESP_LOGW(TAG, "Audio output empty write: samples=%d", samples);
+        ReportOutputTelemetry(false);
+        return 0;
+    }
+    output_write_count_++;
+    bool has_nonzero = false;
+    for (int i = 0; i < samples; ++i) {
+        if (data[i] != 0) {
+            has_nonzero = true;
+            break;
+        }
+    }
+    if (has_nonzero) {
+        output_nonzero_write_count_++;
+        if (!output_first_nonzero_reported_) {
+            output_first_nonzero_reported_ = true;
+            ESP_LOGI(TAG, "Audio telemetry: first nonzero output write samples=%d", samples);
+        }
+    }
+    const esp_err_t err = esp_codec_dev_write(output_dev_, (void*)data, samples * sizeof(int16_t));
+    if (err != ESP_OK) {
+        output_write_error_count_++;
+        ESP_LOGE(TAG, "Audio output write failed: %s (samples=%d errors=%llu)", esp_err_to_name(err), samples,
+                 (unsigned long long)output_write_error_count_);
+    } else {
+        output_frames_written_ += samples;
+    }
+    ReportOutputTelemetry(false);
     return samples;
+}
+
+void CoreS3AudioCodec::ReportOutputTelemetry(bool force)
+{
+    const uint32_t now = esp_log_timestamp();
+    if (!force && now - output_last_report_ms_ < 5000) {
+        return;
+    }
+    output_last_report_ms_ = now;
+    ESP_LOGI(TAG,
+             "Audio telemetry: enabled=%d writes=%llu nonzero=%llu frames=%llu errors=%llu disabled=%llu empty=%llu",
+             output_enabled_ ? 1 : 0, (unsigned long long)output_write_count_,
+             (unsigned long long)output_nonzero_write_count_, (unsigned long long)output_frames_written_,
+             (unsigned long long)output_write_error_count_, (unsigned long long)output_disabled_write_count_,
+             (unsigned long long)output_empty_write_count_);
 }

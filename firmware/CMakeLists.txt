@@ -8,11 +8,21 @@ add_definitions(-DFIRMWARE_VERSION=\"${PROJECT_VER}\")
 # Add this line to disable the specific warning
 add_compile_options(-Wno-missing-field-initializers)
 
+# CI can keep sdkconfig and defaults outside the checkout. These environment
+# variables are intentionally paths only; credentials must not be passed here.
+if(DEFINED ENV{STACKCHAN_SDKCONFIG})
+    set(SDKCONFIG "$ENV{STACKCHAN_SDKCONFIG}"
+        CACHE FILEPATH "StackChan sdkconfig path" FORCE)
+endif()
+
+if(DEFINED ENV{STACKCHAN_SDKCONFIG_DEFAULTS})
+    set(SDKCONFIG_DEFAULTS "$ENV{STACKCHAN_SDKCONFIG_DEFAULTS}"
+        CACHE STRING "StackChan sdkconfig default files" FORCE)
+    message(STATUS "StackChan: applying explicit sdkconfig defaults")
 # Auto-load a local sdkconfig overlay (git-ignored) when present. Lets
 # self-hosted / custom deployments pin CONFIG_STACKCHAN_SERVER_URL,
 # CONFIG_OTA_URL, etc. without touching committed defaults.
-# Manual equivalent: SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.local" idf.py build
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig.defaults.local")
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig.defaults.local")
     set(SDKCONFIG_DEFAULTS
         "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig.defaults;${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig.defaults.local"
         CACHE STRING "ESP-IDF sdkconfig default files (auto-extended with local overlay)" FORCE)
