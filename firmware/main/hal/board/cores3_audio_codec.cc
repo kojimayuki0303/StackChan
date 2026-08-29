@@ -286,8 +286,8 @@ int CoreS3AudioCodec::Write(const int16_t* data, int samples) {
     const esp_err_t err = esp_codec_dev_write(output_dev_, (void*)data, samples * sizeof(int16_t));
     if (err != ESP_OK) {
         output_write_error_count_++;
-        ESP_LOGE(TAG, "Audio output write failed: %s (samples=%d errors=%llu)", esp_err_to_name(err), samples,
-                 (unsigned long long)output_write_error_count_);
+        ESP_LOGE(TAG, "Audio output write failed: %s (samples=%d errors=%u)", esp_err_to_name(err), samples,
+                 static_cast<unsigned>(output_write_error_count_));
     } else {
         output_frames_written_ += samples;
     }
@@ -303,9 +303,9 @@ void CoreS3AudioCodec::ReportOutputTelemetry(bool force)
     }
     output_last_report_ms_ = now;
     ESP_LOGI(TAG,
-             "Audio telemetry: enabled=%d writes=%llu nonzero=%llu frames=%llu errors=%llu disabled=%llu empty=%llu",
-             output_enabled_ ? 1 : 0, (unsigned long long)output_write_count_,
-             (unsigned long long)output_nonzero_write_count_, (unsigned long long)output_frames_written_,
-             (unsigned long long)output_write_error_count_, (unsigned long long)output_disabled_write_count_,
-             (unsigned long long)output_empty_write_count_);
+             "Audio telemetry: enabled=%d writes=%u nonzero=%u frames=%u errors=%u disabled=%u empty=%u",
+             output_enabled_ ? 1 : 0, static_cast<unsigned>(output_write_count_),
+             static_cast<unsigned>(output_nonzero_write_count_), static_cast<unsigned>(output_frames_written_),
+             static_cast<unsigned>(output_write_error_count_), static_cast<unsigned>(output_disabled_write_count_),
+             static_cast<unsigned>(output_empty_write_count_));
 }

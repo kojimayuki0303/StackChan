@@ -5,6 +5,7 @@
 #include "application.h"
 #include "config.h"
 #include "power_save_timer.h"
+#include "pmic_power_state.h"
 #include "i2c_device.h"
 #include "axp2101.h"
 #include "settings.h"
@@ -159,15 +160,26 @@ public:
         return true;
     }
 
-    bool IsExternalPowerConnected()
+    bool TryReadPowerState(PmicPowerState& state)
     {
-        const uint8_t power_status      = ReadReg(0x01);
-        const uint8_t current_direction = (power_status & 0b01100000) >> 5;
-        const bool is_charging_done     = (power_status & 0b00000111) == 0b00000100;
+        uint8_t power_status = 0;
+        const esp_err_t err = TryReadRegs(0x01, &power_status, 1);
+        if (err != ESP_OK) {
+            return false;
+        }
+        state = DecodePmicPowerState(power_status);
+        return true;
+    }
 
-        // Treat any non-discharging state as externally powered so a plugged-in cable
-        // still counts even after the battery is full.
-        return current_direction != 2 || is_charging_done;
+    bool TryGetBatteryLevel(int& level)
+    {
+        uint8_t raw_level = 0;
+        const esp_err_t err = TryReadRegs(0xA4, &raw_level, 1);
+        if (err != ESP_OK) {
+            return false;
+        }
+        level = raw_level;
+        return true;
     }
 };
 
@@ -325,6 +337,8 @@ private:
     hal_bridge::XiaozhiConfig_t xiaozhi_config_;
     bool last_power_save_enabled_      = false;
     int64_t last_power_state_check_ms_ = 0;
+    int64_t last_power_state_error_log_ms_ = 0;
+    uint32_t power_state_read_failures_ = 0;
 
     bool ShouldEnablePowerSave(bool has_external_power, bool is_discharging) const
     {
@@ -345,6 +359,24 @@ private:
         last_power_save_enabled_ = should_enable_power_save;
     }
 
+    bool ReadPowerState(PmicPowerState& state)
+    {
+        if (pmic_->TryReadPowerState(state)) {
+            power_state_read_failures_ = 0;
+            return true;
+        }
+
+        power_state_read_failures_++;
+        const int64_t now_ms = esp_timer_get_time() / 1000;
+        if (last_power_state_error_log_ms_ == 0 ||
+            now_ms - last_power_state_error_log_ms_ >= 1000) {
+            ESP_LOGW(TAG, "AXP2101 power-state read timed out; keeping previous state (failures=%u)",
+                     static_cast<unsigned>(power_state_read_failures_));
+            last_power_state_error_log_ms_ = now_ms;
+        }
+        return false;
+    }
+
     void PollPowerSaveState()
     {
         const int64_t now_ms = esp_timer_get_time() / 1000;
@@ -353,7 +385,10 @@ private:
         }
         last_power_state_check_ms_ = now_ms;
 
-        UpdatePowerSaveEnabled(pmic_->IsExternalPowerConnected(), pmic_->IsDischarging());
+        PmicPowerState state;
+        if (ReadPowerState(state)) {
+            UpdatePowerSaveEnabled(state.external_power, state.discharging);
+        }
     }
 
     void InitializePowerSaveTimer()
@@ -380,7 +415,10 @@ private:
             GetBacklight()->RestoreBrightness();
         });
         power_save_timer_->OnShutdownRequest([this]() { pmic_->PowerOff(); });
-        UpdatePowerSaveEnabled(pmic_->IsExternalPowerConnected(), pmic_->IsDischarging());
+        PmicPowerState state;
+        if (ReadPowerState(state)) {
+            UpdatePowerSaveEnabled(state.external_power, state.discharging);
+        }
     }
 
     void InitializeI2c()
@@ -628,15 +666,13 @@ public:
 
     virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override
     {
-        static bool last_discharging = false;
-        charging                     = pmic_->IsCharging();
-        discharging                  = pmic_->IsDischarging();
-        if (discharging != last_discharging) {
-            power_save_timer_->SetEnabled(discharging);
-            last_discharging = discharging;
+        PmicPowerState state;
+        if (!ReadPowerState(state) || !pmic_->TryGetBatteryLevel(level)) {
+            return false;
         }
-
-        level = pmic_->GetBatteryLevel();
+        charging = state.charging;
+        discharging = state.discharging;
+        UpdatePowerSaveEnabled(state.external_power, state.discharging);
         return true;
     }
 
