@@ -47,18 +47,18 @@ private:
     bool dashboard_watch_active_ = false;  // idle-delay timer pending or dashboard currently shown/refreshing
     bool dashboard_enabled_      = false;  // true when CONFIG_STACKCHAN_DASHBOARD_URL is non-empty
 
-    // Head-pet reaction: while the head is being petted the dashboard is
-    // temporarily taken down so the stock (factory) reaction - happy face,
-    // heart/shy decorators and the head motion - is visible on its own. The
-    // dashboard comes back shortly after the petting stops. See
-    // SuspendDashboardForHeadPet().
+    // Head-pet reaction: while the head is being petted every full-screen
+    // overlay is temporarily taken down so the stock (factory) reaction -
+    // black background, happy face, heart/shy decorators and head motion - is
+    // visible on its own. The selected overlay comes back shortly after the
+    // petting stops. See ShowHeadPetReaction().
     // NOTE: the head-pet signal is emitted from the head-touch task while
     // uitk::Signal holds its own mutex, so the slot must never block. It only
-    // kicks dashboard_pet_kick_timer_; all LVGL work happens on the esp_timer
+    // kicks head_pet_kick_timer_; all LVGL work happens on the esp_timer
     // task, the same way preview_timer_ does.
-    esp_timer_handle_t dashboard_pet_kick_timer_ = nullptr;  // one-shot 0 ms: hand the gesture off the touch task
-    esp_timer_handle_t dashboard_pet_timer_      = nullptr;  // one-shot: restore delay after the last pet gesture
-    std::atomic<bool> dashboard_pet_suspended_{false};
+    esp_timer_handle_t head_pet_kick_timer_    = nullptr;  // one-shot 0 ms: hand the gesture off the touch task
+    esp_timer_handle_t head_pet_restore_timer_ = nullptr;  // one-shot: restore delay after the last pet gesture
+    std::atomic<bool> head_pet_reaction_active_{false};
     int head_pet_signal_connection_ = -1;
 
     void CreateIdleMotionModifier();
@@ -77,8 +77,8 @@ private:
         bool manual_display_mode;
     };
     static void DashboardFetchTask(void* arg);
-    void SuspendDashboardForHeadPet();
-    void OnDashboardPetTimerElapsed();
+    void ShowHeadPetReaction();
+    void OnHeadPetRestoreTimerElapsed();
     void ApplyDisplayModeLocked();
     void ShowManualDashboardLocked();
     void OnScreenSwipe(ScreenSwipeDirection direction);
