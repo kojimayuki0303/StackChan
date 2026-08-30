@@ -32,11 +32,11 @@ using namespace stackchan::avatar;
 
 #define TAG "StackChanAvatarDisplay"
 
-// How long the dashboard stays down after the last head-pet gesture.
+// How long full-screen overlays stay down after the last head-pet gesture.
 // Slightly longer than HeadPetModifier's own restore delay (3000 ms) so the
 // avatar has finished going back to its previous emotion and pose before the
-// dashboard covers the face again.
-static constexpr uint64_t kDashboardHeadPetRestoreDelayMs = 3500;
+// selected overlay covers the face again.
+static constexpr uint64_t kHeadPetOverlayRestoreDelayMs = 3500;
 
 // Voice sessions are deliberately user-initiated. The managed firmware config
 // disables wake-word detection; both the avatar and dashboard call this helper
@@ -240,31 +240,31 @@ StackChanAvatarDisplay::StackChanAvatarDisplay(esp_lcd_panel_io_handle_t panel_i
     };
     esp_timer_create(&dashboard_refresh_timer_args, &dashboard_refresh_timer_);
 
-    esp_timer_create_args_t dashboard_pet_timer_args = {
+    esp_timer_create_args_t head_pet_restore_timer_args = {
         .callback =
             [](void* arg) {
                 StackChanAvatarDisplay* display = static_cast<StackChanAvatarDisplay*>(arg);
-                display->OnDashboardPetTimerElapsed();
+                display->OnHeadPetRestoreTimerElapsed();
             },
         .arg                   = this,
         .dispatch_method       = ESP_TIMER_TASK,
-        .name                  = "dash_pet_timer",
+        .name                  = "head_pet_restore",
         .skip_unhandled_events = true,
     };
-    esp_timer_create(&dashboard_pet_timer_args, &dashboard_pet_timer_);
+    esp_timer_create(&head_pet_restore_timer_args, &head_pet_restore_timer_);
 
-    esp_timer_create_args_t dashboard_pet_kick_timer_args = {
+    esp_timer_create_args_t head_pet_kick_timer_args = {
         .callback =
             [](void* arg) {
                 StackChanAvatarDisplay* display = static_cast<StackChanAvatarDisplay*>(arg);
-                display->SuspendDashboardForHeadPet();
+                display->ShowHeadPetReaction();
             },
         .arg                   = this,
         .dispatch_method       = ESP_TIMER_TASK,
-        .name                  = "dash_pet_kick_timer",
+        .name                  = "head_pet_kick",
         .skip_unhandled_events = true,
     };
-    esp_timer_create(&dashboard_pet_kick_timer_args, &dashboard_pet_kick_timer_);
+    esp_timer_create(&head_pet_kick_timer_args, &head_pet_kick_timer_);
 
     // Create boot logo label if not warm boot
     if (GetHAL().getWarmRebootTarget() < 0) {
@@ -306,13 +306,13 @@ StackChanAvatarDisplay::~StackChanAvatarDisplay()
         esp_timer_stop(dashboard_refresh_timer_);
         esp_timer_delete(dashboard_refresh_timer_);
     }
-    if (dashboard_pet_kick_timer_ != nullptr) {
-        esp_timer_stop(dashboard_pet_kick_timer_);
-        esp_timer_delete(dashboard_pet_kick_timer_);
+    if (head_pet_kick_timer_ != nullptr) {
+        esp_timer_stop(head_pet_kick_timer_);
+        esp_timer_delete(head_pet_kick_timer_);
     }
-    if (dashboard_pet_timer_ != nullptr) {
-        esp_timer_stop(dashboard_pet_timer_);
-        esp_timer_delete(dashboard_pet_timer_);
+    if (head_pet_restore_timer_ != nullptr) {
+        esp_timer_stop(head_pet_restore_timer_);
+        esp_timer_delete(head_pet_restore_timer_);
     }
     if (head_pet_signal_connection_ >= 0) {
         GetHAL().onHeadPetGesture.disconnect(head_pet_signal_connection_);
@@ -406,7 +406,7 @@ void StackChanAvatarDisplay::SetupUI()
     }
     media_screen_->SetIconFont(&font_awesome_30_4);
 
-    // Take the dashboard down while the head is being petted so the stock
+    // Take every full-screen overlay down while the head is being petted so the stock
     // HeadPetModifier reaction (happy face + heart/shy decorators) is not
     // covered by it. Only the actual petting gestures count: a bare Press is
     // ignored because it does not trigger the reaction either.
@@ -414,13 +414,13 @@ void StackChanAvatarDisplay::SetupUI()
         const bool petting = (gesture == HeadPetGesture::SwipeForward || gesture == HeadPetGesture::SwipeBackward);
         // A Release restarts the restore delay (the same way HeadPetModifier
         // restarts its own), but only once petting has actually taken the
-        // dashboard down.
+        // selected full-screen overlay down.
         const bool petting_ended =
-            (gesture == HeadPetGesture::Release && dashboard_pet_suspended_.load(std::memory_order_relaxed));
+            (gesture == HeadPetGesture::Release && head_pet_reaction_active_.load(std::memory_order_relaxed));
         if (!petting && !petting_ended) {
             return;
         }
-        if (!dashboard_enabled_ || dashboard_pet_kick_timer_ == nullptr) {
+        if (head_pet_kick_timer_ == nullptr) {
             return;
         }
 
@@ -429,8 +429,8 @@ void StackChanAvatarDisplay::SetupUI()
         // starve every other slot - HeadPetModifier included. Hand the work to
         // the esp_timer task instead. Return values are ignored on purpose: a
         // kick that is already queued does the same job.
-        esp_timer_stop(dashboard_pet_kick_timer_);
-        esp_timer_start_once(dashboard_pet_kick_timer_, 0);
+        esp_timer_stop(head_pet_kick_timer_);
+        esp_timer_start_once(head_pet_kick_timer_, 0);
     });
 
     // GetHAL().startStackChanAutoUpdate(24);
@@ -639,13 +639,15 @@ void StackChanAvatarDisplay::OnScreenSwipe(ScreenSwipeDirection direction)
 
 void StackChanAvatarDisplay::ApplyDisplayModeLocked()
 {
-    const bool show_spotify =
+    const bool spotify_selected =
         display_mode_ == DisplayMode::Spotify && media_screen_ != nullptr && media_screen_->IsActive();
+    const bool show_spotify =
+        spotify_selected && !head_pet_reaction_active_.load(std::memory_order_relaxed);
     if (media_screen_ != nullptr) {
         media_screen_->SetVisible(show_spotify);
     }
 
-    if (show_spotify) {
+    if (spotify_selected) {
         StopDashboardWatch();
         HideDashboardVisualLocked();
         return;
@@ -768,13 +770,6 @@ void StackChanAvatarDisplay::StopDashboardWatch()
     if (dashboard_refresh_timer_ != nullptr) {
         esp_timer_stop(dashboard_refresh_timer_);
     }
-    if (dashboard_pet_kick_timer_ != nullptr) {
-        esp_timer_stop(dashboard_pet_kick_timer_);
-    }
-    if (dashboard_pet_timer_ != nullptr) {
-        esp_timer_stop(dashboard_pet_timer_);
-    }
-    dashboard_pet_suspended_.store(false, std::memory_order_relaxed);
 }
 
 void StackChanAvatarDisplay::HideDashboardVisualLocked()
@@ -837,44 +832,51 @@ void StackChanAvatarDisplay::StartDashboardFetch()
     }
 }
 
-void StackChanAvatarDisplay::SuspendDashboardForHeadPet()
+void StackChanAvatarDisplay::ShowHeadPetReaction()
 {
-    if (!dashboard_enabled_ || !dashboard_watch_active_ || dashboard_pet_timer_ == nullptr) {
+    if (head_pet_restore_timer_ == nullptr) {
         return;
     }
 
-    if (!dashboard_pet_suspended_.exchange(true, std::memory_order_relaxed)) {
-        // First gesture of this petting session: uncover the face. The decoded
-        // frame is kept in dashboard_image_cached_ so it can be put back up
-        // without another fetch.
+    if (!head_pet_reaction_active_.exchange(true, std::memory_order_relaxed)) {
+        // First gesture of this petting session: uncover the face. Cached
+        // content is retained so the selected overlay can return immediately.
         DisplayLockGuard lock(this);
         if (dashboard_image_ != nullptr) {
             lv_obj_add_flag(dashboard_image_, LV_OBJ_FLAG_HIDDEN);
         }
+        if (media_screen_ != nullptr) {
+            media_screen_->SetVisible(false);
+        }
     }
 
-    // Re-arm on every gesture so the dashboard only returns once the petting
+    // Re-arm on every gesture so the selected overlay only returns once the petting
     // has actually stopped.
-    esp_timer_stop(dashboard_pet_timer_);
-    esp_timer_start_once(dashboard_pet_timer_, kDashboardHeadPetRestoreDelayMs * 1000ULL);
+    esp_timer_stop(head_pet_restore_timer_);
+    esp_timer_start_once(head_pet_restore_timer_, kHeadPetOverlayRestoreDelayMs * 1000ULL);
 }
 
-void StackChanAvatarDisplay::OnDashboardPetTimerElapsed()
+void StackChanAvatarDisplay::OnHeadPetRestoreTimerElapsed()
 {
-    dashboard_pet_suspended_.store(false, std::memory_order_relaxed);
+    head_pet_reaction_active_.store(false, std::memory_order_relaxed);
 
-    if (!dashboard_watch_active_ || !hal_bridge::is_xiaozhi_idle()) {
-        // Left idle while being petted - SetStatus() already hid the dashboard.
+    DisplayLockGuard lock(this);
+    const bool spotify_selected =
+        display_mode_ == DisplayMode::Spotify && media_screen_ != nullptr && media_screen_->IsActive();
+    if (spotify_selected) {
+        ApplyDisplayModeLocked();
         return;
     }
 
-    {
-        DisplayLockGuard lock(this);
-        if (dashboard_image_ != nullptr && dashboard_image_cached_ != nullptr) {
-            lv_obj_remove_flag(dashboard_image_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_move_foreground(dashboard_image_);
-            return;
-        }
+    if (!dashboard_watch_active_ || !hal_bridge::is_xiaozhi_idle()) {
+        // Left idle while being petted - SetStatus() already hid the overlays.
+        return;
+    }
+
+    if (dashboard_image_ != nullptr && dashboard_image_cached_ != nullptr) {
+        lv_obj_remove_flag(dashboard_image_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(dashboard_image_);
+        return;
     }
 
     // No cached frame (never fetched, or it was dropped) - pull a fresh one.
@@ -1006,9 +1008,9 @@ void StackChanAvatarDisplay::DashboardFetchTask(void* arg)
             // Scale to fit width, same convention as SetPreviewImage().
             lv_image_set_scale(self->dashboard_image_, 256 * self->width_ / img_dsc->header.w);
         }
-        if (self->dashboard_pet_suspended_.load(std::memory_order_relaxed)) {
+        if (self->head_pet_reaction_active_.load(std::memory_order_relaxed)) {
             // The head is being petted right now: keep the freshly decoded
-            // frame cached but leave the face visible. OnDashboardPetTimerElapsed()
+            // frame cached but leave the face visible. OnHeadPetRestoreTimerElapsed()
             // will put it back up once the petting is over.
             break;
         }
