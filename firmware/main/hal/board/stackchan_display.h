@@ -33,6 +33,11 @@ private:
     std::unique_ptr<ScreenSwipeGesture> screen_swipe_gesture_ = nullptr;
     DisplayMode display_mode_ = DisplayMode::Dashboard;
     bool manual_display_mode_ = false;
+    // Set by a vertical swipe (Up = next, Down = previous) and consumed by the
+    // very next dashboard fetch as a one-shot "focus=next|prev" query param
+    // that asks the server to switch the Codex agent session being shown.
+    // Guarded by the same display lock as display_mode_.
+    int pending_focus_step_ = 0;
 
     // Idle-screen dashboard: shows a server-rendered PNG full-screen over the
     // avatar after the assistant has been idle for a while. See
@@ -75,6 +80,7 @@ private:
         uint32_t generation;
         DisplayMode display_mode;
         bool manual_display_mode;
+        int focus_step;
     };
     static void DashboardFetchTask(void* arg);
     void ShowHeadPetReaction();

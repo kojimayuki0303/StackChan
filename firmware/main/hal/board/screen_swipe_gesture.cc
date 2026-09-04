@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 #include "screen_swipe_gesture.h"
 
-#include <cstdlib>
 #include <hal/hal.h>
+
+#include "screen_swipe_classifier.h"
 
 ScreenSwipeGesture::ScreenSwipeGesture(Callback callback, void* context) : callback_(callback), context_(context)
 {
@@ -53,12 +54,16 @@ void ScreenSwipeGesture::HandleEvent(lv_event_code_t code)
     tracking_ = false;
     const int delta_x = point.x - start_point_.x;
     const int delta_y = point.y - start_point_.y;
-    if (std::abs(delta_x) < kMinimumDistance || std::abs(delta_x) <= std::abs(delta_y)) {
+    const auto direction = ClassifySwipe(delta_x, delta_y, kMinimumDistance);
+    if (!direction.has_value()) {
         return;
     }
 
+    // Set on every classified swipe (horizontal or vertical) so the tap that
+    // ends the gesture is never mistaken for the short screen tap that starts
+    // a voice chat.
     last_swipe_tick_ = lv_tick_get();
     if (callback_ != nullptr) {
-        callback_(context_, delta_x < 0 ? ScreenSwipeDirection::Left : ScreenSwipeDirection::Right);
+        callback_(context_, direction.value());
     }
 }

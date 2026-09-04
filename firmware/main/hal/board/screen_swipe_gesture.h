@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <lvgl.h>
 
-enum class ScreenSwipeDirection { Left, Right };
+#include "screen_swipe_direction.h"
 
 class ScreenSwipeGesture {
 public:
