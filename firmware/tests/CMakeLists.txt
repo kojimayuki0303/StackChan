@@ -40,3 +40,15 @@ target_include_directories(pmic_power_state_test PRIVATE
 target_compile_features(pmic_power_state_test PRIVATE cxx_std_17)
 
 add_test(NAME pmic_power_state_test COMMAND $<TARGET_FILE:pmic_power_state_test>)
+
+add_executable(screen_swipe_classifier_test
+    screen_swipe_classifier_test.cpp
+)
+
+target_include_directories(screen_swipe_classifier_test PRIVATE
+    ../main
+)
+
+target_compile_features(screen_swipe_classifier_test PRIVATE cxx_std_17)
+
+add_test(NAME screen_swipe_classifier_test COMMAND $<TARGET_FILE:screen_swipe_classifier_test>)

@@ -616,6 +616,26 @@ void StackChanAvatarDisplay::DashboardEventHandler(lv_event_t* event)
 void StackChanAvatarDisplay::OnScreenSwipe(ScreenSwipeDirection direction)
 {
     const bool spotify_available = media_screen_ != nullptr && media_screen_->IsActive();
+
+    if (direction == ScreenSwipeDirection::Up || direction == ScreenSwipeDirection::Down) {
+        // Vertical swipe = agent session switch: it asks the dashboard server
+        // to move focus to the next/previous coding-agent session. While the
+        // Spotify screen is selected and visible, a vertical swipe must not
+        // yank the user away from playback controls, so ignore it there.
+        const bool spotify_selected_and_visible = spotify_available && display_mode_ == DisplayMode::Spotify;
+        if (spotify_selected_and_visible) {
+            return;
+        }
+        display_mode_ = DisplayMode::Codex;
+        manual_display_mode_ = true;
+        // One-shot: consumed and cleared by the very next StartDashboardFetch()
+        // so retries or the regular 5s poll never resend the same step.
+        pending_focus_step_ = direction == ScreenSwipeDirection::Up ? +1 : -1;
+        StopDashboardWatch();
+        ApplyDisplayModeLocked();
+        return;
+    }
+
     if (!spotify_available) {
         display_mode_ = display_mode_ == DisplayMode::Codex ? DisplayMode::Dashboard : DisplayMode::Codex;
     } else if (direction == ScreenSwipeDirection::Left) {
@@ -823,7 +843,10 @@ void StackChanAvatarDisplay::StartDashboardFetch()
         dashboard_generation_.load(std::memory_order_relaxed),
         display_mode_,
         manual_display_mode_,
+        pending_focus_step_,
     };
+    // One-shot: clear now so a retry or the next 5s poll doesn't resend it.
+    pending_focus_step_ = 0;
     BaseType_t res = xTaskCreate(&StackChanAvatarDisplay::DashboardFetchTask, "dash_fetch", 6144, ctx, 3, nullptr);
     if (res != pdPASS) {
         ESP_LOGE(TAG, "Failed to create dashboard fetch task");
@@ -902,6 +925,13 @@ void StackChanAvatarDisplay::DashboardFetchTask(void* arg)
             (ctx->display_mode == DisplayMode::Codex || ctx->display_mode == DisplayMode::Dashboard)) {
             url += url.find('?') == std::string::npos ? "?view=" : "&view=";
             url += ctx->display_mode == DisplayMode::Codex ? "codex" : "dashboard";
+        }
+        if (ctx->focus_step != 0) {
+            // One-shot agent-session-focus step from a vertical swipe: sent
+            // exactly once on this fetch, never on the regular refresh polls.
+            ESP_LOGI(TAG, "Dashboard fetch: requesting focus step %d", ctx->focus_step);
+            url += url.find('?') == std::string::npos ? "?focus=" : "&focus=";
+            url += ctx->focus_step > 0 ? "next" : "prev";
         }
         Settings websocket_settings("websocket", false);
         std::string token = websocket_settings.GetString("token");
