@@ -4,15 +4,16 @@
 #include <atomic>
 #include <tusb.h>
 #include <esp_ota_ops.h>
-#include <esp_rom_sys.h>
-#include <soc/rtc_cntl_reg.h>
-#include <soc/soc.h>
+#include <hal/wdt_hal.h>
+#include <soc/rtc.h>
+#include <esp_private/rtc_clk.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
 namespace {
 std::atomic<uint32_t> calls{0}, received{0}, played{0}, nonzero{0}, errors{0}, dropped{0};
 uint32_t snapshot[7];
+uint32_t boot_snapshot[2];
 std::atomic<bool> rollback_started{false};
 
 void Rollback(void*)
@@ -22,12 +23,17 @@ void Rollback(void*)
     // If it is unavailable the API returns an error and leaves this app running.
     if (esp_ota_mark_app_invalid_rollback() == ESP_OK) {
         tud_disconnect();
-        // esp_restart() preserves USB peripheral state on S3. Hand the PHY
-        // back to hardware Serial/JTAG, then reset the whole digital system
-        // so the previous serial firmware can enumerate without a button press.
-        REG_CLR_BIT(RTC_CNTL_USB_CONF_REG,
-                    RTC_CNTL_SW_HW_USB_PHY_SEL | RTC_CNTL_SW_USB_PHY_SEL | RTC_CNTL_USB_PAD_ENABLE);
-        esp_rom_software_reset_system();
+        // CPU/digital-system resets preserve RTC USB PHY state on S3.
+        // Reset the RTC domain too, as esptool's watchdog_reset does, so the
+        // previous serial firmware can enumerate again on the same cable.
+        wdt_hal_context_t watchdog;
+        wdt_hal_init(&watchdog, WDT_RWDT, 0, false);
+        wdt_hal_write_protect_disable(&watchdog);
+        wdt_hal_config_stage(&watchdog, WDT_STAGE0, rtc_clk_slow_freq_get_hz() / 10,
+                             WDT_STAGE_ACTION_RESET_RTC);
+        wdt_hal_enable(&watchdog);
+        wdt_hal_write_protect_enable(&watchdog);
+        for (;;) vTaskDelay(pdMS_TO_TICKS(100));
     }
     rollback_started.store(false);
     vTaskDelete(nullptr);
@@ -51,6 +57,16 @@ void RecordUsbSpeakerWrite(const int16_t* pcm, size_t frames, int written)
 extern "C" bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
                                           tusb_control_request_t const* request)
 {
+    if (request->bmRequestType == 0xc0 && request->bRequest == 0x52 &&
+        request->wValue == 0x5043 && request->wIndex == 0 && request->wLength == sizeof(boot_snapshot)) {
+        if (stage != CONTROL_STAGE_SETUP) return true;
+        const auto* running = esp_ota_get_running_partition();
+        esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+        if (!running || esp_ota_get_state_partition(running, &state) != ESP_OK) return false;
+        boot_snapshot[0] = running->subtype;
+        boot_snapshot[1] = state;
+        return tud_control_xfer(rhport, request, boot_snapshot, sizeof(boot_snapshot));
+    }
     if (request->bmRequestType == 0x40 && request->bRequest == 0x51 &&
         request->wValue == 0x5043 && request->wIndex == 0 && request->wLength == 0) {
         if (stage == CONTROL_STAGE_SETUP) return tud_control_status(rhport, request);

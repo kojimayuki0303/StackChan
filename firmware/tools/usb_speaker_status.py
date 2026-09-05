@@ -47,6 +47,13 @@ def read_status(restore_previous=False):
         result = dict(zip(keys, struct.unpack('<7I', buffer.raw)))
         if result['version'] != 1:
             raise RuntimeError('Unsupported diagnostics version')
+        boot = c.create_string_buffer(8)
+        boot_count = usb.libusb_control_transfer(handle, 0xc0, 0x52, 0x5043, 0, boot, 8, 2000)
+        if boot_count == 8:
+            subtype, state = struct.unpack('<2I', boot.raw)
+            result['ota_slot'] = subtype - 0x10
+            result['ota_state'] = state
+            result['boot_confirmed'] = state == 2
         return result
     finally:
         if handle:

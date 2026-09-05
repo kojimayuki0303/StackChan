@@ -38,6 +38,10 @@ can roll back if startup fails. Do not erase NVS, the old app or assets. USB UAC
 uses the same internal PHY as USB Serial/JTAG: the serial port disappears while
 this profile runs. No eFuses are changed.
 
+When flashing over ESP32-S3 USB Serial/JTAG, use esptool's
+`--after watchdog_reset` to leave download mode reliably. A plain RTS reset can
+leave this device in download mode even after a successfully verified write.
+
 ## Mac output selection
 
 ```sh
@@ -67,6 +71,11 @@ Compare before/after a low-level test sound. `frames_written` and
 prove successful writes to the speaker codec. Acoustic audibility and sound
 quality still require listening. Snapshot fields are sampled separately; do not
 assume that a changing snapshot is an atomic accounting total.
+
+The diagnostic also reports the running OTA slot and `boot_confirmed`. After
+20 seconds of stable startup, `boot_confirmed` must be true so the next restart
+retains this firmware. The auto-start assistant path runs the same confirmation
+as the launcher; it must not skip the confirmation when bypassing the launcher.
 
 The optional recovery command requests restoration of the previous valid OTA
 firmware and a reboot. Stop playback and restore the Mac's previous output first.

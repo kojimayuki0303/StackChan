@@ -149,6 +149,10 @@ static void _stackchan_update_task(void* param)
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(20));
 
+        // Auto-start skips the launcher loop. Keep its stable-boot OTA
+        // confirmation running here too, before taking the display lock.
+        GetHAL().updateHeapStatusLog();
+
         tools::update_reminders();
 
         LvglLockGuard lock;
