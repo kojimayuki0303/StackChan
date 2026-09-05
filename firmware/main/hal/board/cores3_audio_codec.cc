@@ -1,4 +1,5 @@
 #include "cores3_audio_codec.h"
+#include "../usb_speaker_pcm.h"
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
@@ -182,7 +183,13 @@ void CoreS3AudioCodec::CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gp
     ESP_LOGI(TAG, "Duplex channels created");
 }
 
+void CoreS3AudioCodec::Start() {
+    std::lock_guard<std::recursive_mutex> lock(output_mutex_);
+    AudioCodec::Start();
+}
+
 void CoreS3AudioCodec::SetOutputVolume(int volume) {
+    std::lock_guard<std::recursive_mutex> lock(output_mutex_);
     ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, volume));
     AudioCodec::SetOutputVolume(volume);
 }
@@ -211,6 +218,10 @@ void CoreS3AudioCodec::EnableInput(bool enable) {
 }
 
 void CoreS3AudioCodec::EnableOutput(bool enable) {
+    std::lock_guard<std::recursive_mutex> lock(output_mutex_);
+    if (!enable && usb_write_seen_ && static_cast<uint32_t>(esp_log_timestamp() - last_usb_write_ms_) < 250) {
+        return;
+    }
     if (enable == output_enabled_) {
         return;
     }
@@ -254,6 +265,28 @@ int CoreS3AudioCodec::Read(int16_t* dest, int samples) {
 }
 
 int CoreS3AudioCodec::Write(const int16_t* data, int samples) {
+    std::lock_guard<std::recursive_mutex> lock(output_mutex_);
+    native_write_seen_ = true;
+    last_native_write_ms_ = esp_log_timestamp();
+    const int written = WriteOutput(data, samples);
+    last_native_write_ms_ = esp_log_timestamp();
+    return written;
+}
+
+int CoreS3AudioCodec::WriteUsbPcm(const int16_t* data, int samples) {
+    std::lock_guard<std::recursive_mutex> lock(output_mutex_);
+    const uint32_t now = esp_log_timestamp();
+    if (usb_speaker::NativeHasPriority(now, last_native_write_ms_, native_write_seen_)) {
+        return 0;
+    }
+    EnableOutput(true);
+    if (!output_enabled_) return -1;
+    last_usb_write_ms_ = now;
+    usb_write_seen_ = true;
+    return WriteOutput(data, samples);
+}
+
+int CoreS3AudioCodec::WriteOutput(const int16_t* data, int samples) {
     if (!output_enabled_) {
         output_disabled_write_count_++;
         if (output_disabled_write_count_ == 1) {
@@ -292,7 +325,7 @@ int CoreS3AudioCodec::Write(const int16_t* data, int samples) {
         output_frames_written_ += samples;
     }
     ReportOutputTelemetry(false);
-    return samples;
+    return err == ESP_OK ? samples : -1;
 }
 
 void CoreS3AudioCodec::ReportOutputTelemetry(bool force)

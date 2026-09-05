@@ -294,6 +294,7 @@ idf_component_register(SRCS ${SOURCES}
                     INCLUDE_DIRS ${INCLUDE_DIRS}
                     WHOLE_ARCHIVE
                     PRIV_REQUIRES
+                        espressif__tinyusb
                         esp_pm
                         esp_psram
                         esp_netif
@@ -317,6 +318,31 @@ idf_component_register(SRCS ${SOURCES}
                         mooncake_log
                         smooth_ui_toolkit
                     )
+
+# usb_device_uac 1.3.1 adds its descriptors as PUBLIC sources on TinyUSB.
+# Our main component uses WHOLE_ARCHIVE, so transitive compilation otherwise
+# defines the descriptors in both libmain and the final ELF. Keep the source
+# in TinyUSB itself, but do not compile another copy in every consumer.
+idf_component_get_property(usb_device_library espressif__tinyusb COMPONENT_LIB)
+get_target_property(usb_interface_sources ${usb_device_library} INTERFACE_SOURCES)
+if(usb_interface_sources)
+    list(FILTER usb_interface_sources EXCLUDE REGEX "/usb_descriptors\\.c$")
+    set_property(TARGET ${usb_device_library} PROPERTY INTERFACE_SOURCES "${usb_interface_sources}")
+endif()
+
+# macOS names the AudioEngine after its streaming interface, not iProduct.
+# Derive the descriptor from the pinned upstream source, retaining its license,
+# and replace only the generic interface label. Managed components stay intact.
+idf_component_get_property(uac_component_dir espressif__usb_device_uac COMPONENT_DIR)
+set(uac_descriptor_source "${uac_component_dir}/tusb/usb_descriptors.c")
+file(READ "${uac_descriptor_source}" uac_descriptor_text)
+string(REPLACE "\"speaker\"" "CONFIG_UAC_TUSB_PRODUCT" uac_descriptor_text "${uac_descriptor_text}")
+set(uac_descriptor_generated "${CMAKE_CURRENT_BINARY_DIR}/ponchan_usb_descriptors.c")
+file(CONFIGURE OUTPUT "${uac_descriptor_generated}" CONTENT "${uac_descriptor_text}" @ONLY)
+get_target_property(usb_sources ${usb_device_library} SOURCES)
+list(FILTER usb_sources EXCLUDE REGEX "/usb_descriptors\\.c$")
+set_property(TARGET ${usb_device_library} PROPERTY SOURCES "${usb_sources}")
+target_sources(${usb_device_library} PRIVATE "${uac_descriptor_generated}")
 
 # Use target_compile_definitions to define BOARD_TYPE, BOARD_NAME
 # If BOARD_NAME is empty, use BOARD_TYPE

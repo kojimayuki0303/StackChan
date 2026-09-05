@@ -5,9 +5,16 @@
 
 #include <esp_codec_dev.h>
 #include <esp_codec_dev_defaults.h>
+#include <mutex>
 
 class CoreS3AudioCodec : public AudioCodec {
 private:
+    std::recursive_mutex output_mutex_;
+    uint32_t last_native_write_ms_ = 0;
+    uint32_t last_usb_write_ms_ = 0;
+    bool native_write_seen_ = false;
+    bool usb_write_seen_ = false;
+    int WriteOutput(const int16_t* data, int samples);
     const audio_codec_data_if_t* data_if_ = nullptr;
     const audio_codec_ctrl_if_t* out_ctrl_if_ = nullptr;
     const audio_codec_if_t* out_codec_if_ = nullptr;
@@ -37,6 +44,9 @@ private:
     virtual int Write(const int16_t* data, int samples) override;
 
 public:
+    // USB playback yields to native speech without opening any microphone.
+    int WriteUsbPcm(const int16_t* data, int samples);
+    void Start() override;
     CoreS3AudioCodec(void* i2c_master_handle, int input_sample_rate, int output_sample_rate,
         gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din,
         uint8_t aw88298_addr, uint8_t es7210_addr, bool input_reference);

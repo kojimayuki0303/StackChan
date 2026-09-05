@@ -1,5 +1,13 @@
 menu "StackChan Server"
 
+config STACKCHAN_USB_SPEAKER
+    bool "USB speaker (Mac system audio)"
+    depends on IDF_TARGET_ESP32S3 && BOARD_TYPE_M5STACK_STACK_CHAN
+    default n
+    help
+        Receive playback audio over USB. Does not expose a USB microphone or
+        start an assistant session. Use sdkconfig.defaults.usb-speaker.
+
 config STACKCHAN_AI_AGENT_AUTO_START
     bool "Start the AI Agent immediately after boot"
     default n
