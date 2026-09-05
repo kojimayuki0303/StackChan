@@ -37,6 +37,8 @@
 # Build files
 build/
 build-host-tests/
+build-usb*/
+__pycache__/
 cmake-build-*/
 /components/
 managed_components/

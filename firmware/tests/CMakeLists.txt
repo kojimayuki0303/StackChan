@@ -52,3 +52,15 @@ target_include_directories(screen_swipe_classifier_test PRIVATE
 target_compile_features(screen_swipe_classifier_test PRIVATE cxx_std_17)
 
 add_test(NAME screen_swipe_classifier_test COMMAND $<TARGET_FILE:screen_swipe_classifier_test>)
+
+add_executable(usb_speaker_pcm_test
+    usb_speaker_pcm_test.cpp
+)
+
+target_include_directories(usb_speaker_pcm_test PRIVATE
+    ../main
+)
+
+target_compile_features(usb_speaker_pcm_test PRIVATE cxx_std_17)
+
+add_test(NAME usb_speaker_pcm_test COMMAND $<TARGET_FILE:usb_speaker_pcm_test>)
